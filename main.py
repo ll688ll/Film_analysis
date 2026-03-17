@@ -1,3 +1,5 @@
+VERSION = "1.0.0"
+
 import tkinter as tk
 from tkinter import filedialog, messagebox
 from tkinter import ttk
@@ -9,6 +11,8 @@ from matplotlib.figure import Figure
 import matplotlib.patches as patches
 import json
 import os
+import sys
+from scipy.optimize import curve_fit
 from matplotlib.widgets import RectangleSelector, EllipseSelector
 from matplotlib.path import Path
 from matplotlib.transforms import Affine2D
@@ -31,6 +35,10 @@ def rational_func_calibration(pixel_val, a, b, c):
     term1 = np.divide(b, denominator, out=np.zeros_like(denominator), where=denominator!=0)
     
     return term1 + c
+
+def rational_color_model(dose, a, b, c):
+    """Color% = a + b / (Dose - c) — forward model for curve fitting."""
+    return a + b / (dose - c)
 
 class FilmAnalyzer:
     def __init__(self):
@@ -115,12 +123,358 @@ class FilmAnalyzer:
             "flatness": flatness
         }
 
+# --- Calibration Wizard ---
+
+class CalibrationWizard(tk.Toplevel):
+    def __init__(self, parent):
+        super().__init__(parent)
+        self.parent_app = parent
+        self.title("Calibration Wizard")
+        self.geometry("1200x800")
+
+        self.calibration_points = []  # list of {dose, red_pct, green_pct, blue_pct, filename}
+        self.fitted_params = None  # {Red: {a,b,c}, Green: {a,b,c}, Blue: {a,b,c}}
+        self.current_image_array = None
+        self.current_filepath = None
+
+        self._setup_ui()
+
+    def _setup_ui(self):
+        # Left control panel
+        control_frame = ttk.Frame(self, padding="10")
+        control_frame.pack(side=tk.LEFT, fill=tk.Y)
+
+        # Profile name
+        ttk.Label(control_frame, text="Profile Name:").pack(anchor='w')
+        self.profile_name_var = tk.StringVar(value="New Calibration")
+        ttk.Entry(control_frame, textvariable=self.profile_name_var, width=30).pack(fill=tk.X, pady=2)
+
+        # Note
+        ttk.Label(control_frame, text="Note:").pack(anchor='w')
+        self.note_text = tk.Text(control_frame, height=3, width=30)
+        self.note_text.pack(fill=tk.X, pady=2)
+
+        ttk.Separator(control_frame, orient='horizontal').pack(fill='x', pady=5)
+
+        # Load image
+        ttk.Button(control_frame, text="Load Film Image", command=self._load_image).pack(fill=tk.X, pady=2)
+        self.image_label = ttk.Label(control_frame, text="No image loaded", wraplength=200)
+        self.image_label.pack(pady=2)
+
+        # Dose entry
+        dose_frame = ttk.Frame(control_frame)
+        dose_frame.pack(fill=tk.X, pady=2)
+        ttk.Label(dose_frame, text="Dose (Gy):").pack(side=tk.LEFT)
+        self.dose_var = tk.StringVar(value="0.0")
+        ttk.Entry(dose_frame, textvariable=self.dose_var, width=10).pack(side=tk.RIGHT)
+
+        # Add point button
+        ttk.Button(control_frame, text="Add Point from ROI", command=self._add_point).pack(fill=tk.X, pady=5)
+
+        ttk.Separator(control_frame, orient='horizontal').pack(fill='x', pady=5)
+
+        # Points table
+        ttk.Label(control_frame, text="Calibration Points:").pack(anchor='w')
+        columns = ("#", "Dose", "Red%", "Green%", "Blue%", "File")
+        self.tree = ttk.Treeview(control_frame, columns=columns, show='headings', height=8)
+        for col in columns:
+            self.tree.heading(col, text=col)
+            self.tree.column(col, width=50 if col == "#" else 60)
+        self.tree.column("File", width=80)
+        self.tree.pack(fill=tk.X, pady=2)
+
+        ttk.Button(control_frame, text="Remove Selected", command=self._remove_point).pack(fill=tk.X, pady=2)
+
+        ttk.Separator(control_frame, orient='horizontal').pack(fill='x', pady=5)
+
+        # Fit button
+        ttk.Button(control_frame, text="Fit Curves", command=self._fit_curves).pack(fill=tk.X, pady=5)
+
+        # Results display
+        self.results_text = tk.Text(control_frame, height=10, width=30)
+        self.results_text.pack(fill=tk.X, pady=2)
+
+        # Primary channel selector
+        ch_frame = ttk.Frame(control_frame)
+        ch_frame.pack(fill=tk.X, pady=2)
+        ttk.Label(ch_frame, text="Primary Channel:").pack(side=tk.LEFT)
+        self.primary_channel_var = tk.StringVar(value="Red")
+        ttk.Combobox(ch_frame, textvariable=self.primary_channel_var,
+                      values=["Red", "Green", "Blue"], width=8).pack(side=tk.RIGHT)
+
+        # Save button
+        ttk.Button(control_frame, text="Save as Profile", command=self._save_profile).pack(fill=tk.X, pady=5)
+
+        # Right panel — matplotlib
+        display_frame = ttk.Frame(self, padding="10")
+        display_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
+
+        self.figure = Figure(figsize=(7, 7), dpi=100)
+        self.ax_image = self.figure.add_subplot(211)
+        self.ax_curve = self.figure.add_subplot(212)
+        self.ax_image.set_title("Film Image (draw ROI)")
+        self.ax_curve.set_title("Calibration Curve")
+        self.ax_curve.set_xlabel("Dose (Gy)")
+        self.ax_curve.set_ylabel("Color %")
+        self.ax_curve.grid(True, alpha=0.3)
+        self.figure.tight_layout()
+
+        self.canvas = FigureCanvasTkAgg(self.figure, master=display_frame)
+        self.canvas.draw()
+        self.canvas.get_tk_widget().pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+        toolbar = NavigationToolbar2Tk(self.canvas, display_frame)
+        toolbar.update()
+
+        # ROI selector on image axes
+        self.rect_selector = RectangleSelector(
+            self.ax_image, lambda eclick, erelease: None,
+            interactive=True, useblit=True, button=[1],
+            props=dict(facecolor='cyan', edgecolor='cyan', alpha=0.3, fill=True)
+        )
+
+    def _load_image(self):
+        path = filedialog.askopenfilename(
+            parent=self,
+            filetypes=[("Images", "*.tif;*.png;*.jpg;*.jpeg")])
+        if not path:
+            return
+        try:
+            img = Image.open(path)
+            self.current_image_array = np.array(img)
+            self.current_filepath = path
+            self.image_label.config(text=os.path.basename(path))
+
+            # Deactivate old selector before clearing axes
+            self.rect_selector.set_active(False)
+            self.rect_selector.disconnect_events()
+
+            self.ax_image.clear()
+            self.ax_image.set_title("Film Image (draw ROI)")
+            if self.current_image_array.ndim == 2:
+                self.ax_image.imshow(self.current_image_array, cmap='gray')
+            else:
+                self.ax_image.imshow(self.current_image_array)
+
+            # Recreate selector on refreshed axes
+            self.rect_selector = RectangleSelector(
+                self.ax_image, lambda eclick, erelease: None,
+                interactive=True, useblit=True, button=[1],
+                props=dict(facecolor='cyan', edgecolor='cyan', alpha=0.3, fill=True)
+            )
+            self.canvas.draw()
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to load image: {e}")
+
+    def _add_point(self):
+        if self.current_image_array is None:
+            messagebox.showwarning("No Image", "Load a film image first.")
+            return
+
+        # Get ROI from selector
+        extents = self.rect_selector.extents  # xmin, xmax, ymin, ymax
+        xmin, xmax, ymin, ymax = [int(round(v)) for v in extents]
+
+        if xmin == xmax or ymin == ymax:
+            messagebox.showwarning("No ROI", "Draw a rectangle ROI on the image first.")
+            return
+
+        # Clamp to image bounds
+        h_img, w_img = self.current_image_array.shape[:2]
+        xmin = max(0, min(xmin, w_img - 1))
+        xmax = max(0, min(xmax, w_img))
+        ymin = max(0, min(ymin, h_img - 1))
+        ymax = max(0, min(ymax, h_img))
+
+        try:
+            dose = float(self.dose_var.get())
+        except ValueError:
+            messagebox.showwarning("Invalid Dose", "Enter a valid dose value in Gy.")
+            return
+
+        if dose < 0:
+            messagebox.showwarning("Negative Dose", "Dose should not be negative.")
+            return
+
+        roi = self.current_image_array[ymin:ymax, xmin:xmax]
+
+        if self.current_image_array.ndim == 2:
+            # Grayscale — use same value for all channels
+            val = np.mean(roi) / 255.0
+            red_pct, green_pct, blue_pct = val, val, val
+        else:
+            red_pct = np.mean(roi[:, :, 0]) / 255.0
+            green_pct = np.mean(roi[:, :, 1]) / 255.0
+            blue_pct = np.mean(roi[:, :, 2]) / 255.0
+
+        point = {
+            'dose': dose,
+            'red_pct': red_pct,
+            'green_pct': green_pct,
+            'blue_pct': blue_pct,
+            'filename': os.path.basename(self.current_filepath) if self.current_filepath else ""
+        }
+        self.calibration_points.append(point)
+        self._update_table()
+        self._update_data_plot()
+
+    def _remove_point(self):
+        selected = self.tree.selection()
+        if not selected:
+            return
+        # Get index from the item values
+        for item in selected:
+            idx = int(self.tree.item(item)['values'][0]) - 1
+            if 0 <= idx < len(self.calibration_points):
+                self.calibration_points.pop(idx)
+        self._update_table()
+        self._update_data_plot()
+
+    def _update_table(self):
+        self.tree.delete(*self.tree.get_children())
+        for i, p in enumerate(self.calibration_points):
+            self.tree.insert('', 'end', values=(
+                i + 1,
+                f"{p['dose']:.3f}",
+                f"{p['red_pct']*100:.1f}",
+                f"{p['green_pct']*100:.1f}",
+                f"{p['blue_pct']*100:.1f}",
+                p['filename']
+            ))
+
+    def _update_data_plot(self):
+        self.ax_curve.clear()
+        self.ax_curve.set_title("Calibration Curve")
+        self.ax_curve.set_xlabel("Dose (Gy)")
+        self.ax_curve.set_ylabel("Color %")
+        self.ax_curve.grid(True, alpha=0.3)
+
+        if not self.calibration_points:
+            self.canvas.draw()
+            return
+
+        doses = [p['dose'] for p in self.calibration_points]
+        reds = [p['red_pct'] * 100 for p in self.calibration_points]
+        greens = [p['green_pct'] * 100 for p in self.calibration_points]
+        blues = [p['blue_pct'] * 100 for p in self.calibration_points]
+
+        self.ax_curve.scatter(doses, reds, c='red', s=40, zorder=5, label='Red')
+        self.ax_curve.scatter(doses, greens, c='green', s=40, zorder=5, label='Green')
+        self.ax_curve.scatter(doses, blues, c='blue', s=40, zorder=5, label='Blue')
+
+        # If we have fitted curves, draw them
+        if self.fitted_params:
+            dose_range = np.linspace(0, max(doses) * 1.1, 200)
+            colors_map = {'Red': 'red', 'Green': 'green', 'Blue': 'blue'}
+            for ch, color in colors_map.items():
+                if ch in self.fitted_params:
+                    p = self.fitted_params[ch]
+                    fit_vals = rational_color_model(dose_range, p['a'], p['b'], p['c']) * 100
+                    self.ax_curve.plot(dose_range, fit_vals, color=color, linewidth=2)
+
+        self.ax_curve.legend()
+        self.canvas.draw()
+
+    def _fit_curves(self):
+        n = len(self.calibration_points)
+        if n < 4:
+            messagebox.showwarning("Not Enough Points",
+                                   f"Need at least 4 data points (have {n}).")
+            return
+
+        doses = np.array([p['dose'] for p in self.calibration_points])
+        channel_data = {
+            'Red': np.array([p['red_pct'] for p in self.calibration_points]),
+            'Green': np.array([p['green_pct'] for p in self.calibration_points]),
+            'Blue': np.array([p['blue_pct'] for p in self.calibration_points]),
+        }
+
+        self.fitted_params = {}
+        self.results_text.delete(1.0, tk.END)
+
+        for ch_name, colors in channel_data.items():
+            # Initial guesses
+            a0 = float(np.min(colors))
+            c0 = -1.0
+            b0 = (float(np.max(colors)) - a0) * (-c0)
+
+            # Upper bound for c: must be below min dose
+            c_upper = float(np.min(doses)) - 0.001
+
+            try:
+                popt, _ = curve_fit(
+                    rational_color_model, doses, colors,
+                    p0=[a0, b0, c0],
+                    bounds=([-np.inf, -np.inf, -np.inf],
+                            [np.inf, np.inf, c_upper]),
+                    maxfev=10000
+                )
+                a_fit, b_fit, c_fit = popt
+
+                # R-squared
+                predicted = rational_color_model(doses, *popt)
+                ss_res = np.sum((colors - predicted) ** 2)
+                ss_tot = np.sum((colors - np.mean(colors)) ** 2)
+                r_sq = 1 - ss_res / ss_tot if ss_tot > 0 else 0.0
+
+                self.fitted_params[ch_name] = {
+                    'a': float(a_fit), 'b': float(b_fit), 'c': float(c_fit)
+                }
+                self.results_text.insert(tk.END,
+                    f"{ch_name}:\n"
+                    f"  a={a_fit:.6f}  b={b_fit:.6f}  c={c_fit:.6f}\n"
+                    f"  R²={r_sq:.6f}\n\n")
+
+            except Exception as e:
+                self.results_text.insert(tk.END,
+                    f"{ch_name}: FIT FAILED - {e}\n\n")
+
+        self._update_data_plot()
+
+    def _save_profile(self):
+        if not self.fitted_params:
+            messagebox.showwarning("No Fit", "Fit the curves first.")
+            return
+
+        profile_name = self.profile_name_var.get().strip()
+        if not profile_name:
+            messagebox.showwarning("No Name", "Enter a profile name.")
+            return
+
+        note = self.note_text.get(1.0, tk.END).strip()
+        primary_ch = self.primary_channel_var.get()
+
+        # Build channel params
+        channels = {}
+        for ch_name, params in self.fitted_params.items():
+            channels[ch_name] = {
+                'a': params['a'], 'b': params['b'], 'c': params['c']
+            }
+
+        # Get a/b/c for the primary channel (for top-level use)
+        primary = channels.get(primary_ch, next(iter(channels.values())))
+
+        profile = {
+            'name': profile_name,
+            'note': note,
+            'color_channel': primary_ch,
+            'channels': channels,
+        }
+
+        self.parent_app.profiles[profile_name] = profile
+        self.parent_app._save_config()
+        self.parent_app.update_profile_list(profile_name)
+        self.parent_app.on_profile_change()
+
+        messagebox.showinfo("Saved", f"Profile '{profile_name}' saved.")
+
+
 # --- GUI ---
 
 class FilmApp(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Radiation Film Analysis")
+        self.title(f"Radiation Film Analysis v{VERSION}")
         self.geometry("1400x900")
 
         self.analyzer = FilmAnalyzer()
@@ -134,7 +488,12 @@ class FilmApp(tk.Tk):
         
         self.roi_mode = tk.StringVar(value="Rectangle") # Rectangle or Circle
         
-        self.config_file = "calibration_config.json"
+        # When running as a PyInstaller exe, resolve config relative to the exe location
+        if getattr(sys, 'frozen', False):
+            base_dir = os.path.dirname(sys.executable)
+        else:
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+        self.config_file = os.path.join(base_dir, "calibration_config.json")
         
         self._setup_ui()
         self._load_config()
@@ -166,6 +525,10 @@ class FilmApp(tk.Tk):
         ttk.Separator(control_frame, orient='horizontal').pack(fill='x', pady=10)
 
         # Calibration Params
+        ttk.Button(control_frame, text="Calibration Wizard...", command=self.open_calibration_wizard).pack(pady=5, fill=tk.X)
+        
+        ttk.Separator(control_frame, orient='horizontal').pack(fill='x', pady=10)
+
         ttk.Label(control_frame, text="Calibration Profile:").pack(anchor='w')
         
         prof_frame = ttk.Frame(control_frame)
@@ -175,7 +538,10 @@ class FilmApp(tk.Tk):
         self.profile_combo = ttk.Combobox(prof_frame, textvariable=self.profile_var)
         self.profile_combo.pack(side=tk.LEFT, fill=tk.X, expand=True)
         self.profile_combo.bind("<<ComboboxSelected>>", self.on_profile_change)
-        
+
+        self.profile_note_label = ttk.Label(control_frame, text="", wraplength=250, font=("Arial", 7, "italic"))
+        self.profile_note_label.pack(anchor='w')
+
         ttk.Label(control_frame, text="Dose = b / (Color% - a) + c", font=("Arial", 8, "italic")).pack(anchor='w')
         
         params_frame = ttk.Frame(control_frame)
@@ -195,6 +561,7 @@ class FilmApp(tk.Tk):
         self.channel_var = tk.StringVar(value="Green")
         channel_cb = ttk.Combobox(control_frame, textvariable=self.channel_var, values=["Red", "Green", "Blue", "Gray"])
         channel_cb.pack(fill=tk.X)
+        channel_cb.bind("<<ComboboxSelected>>", self.on_channel_change)
 
         # Colormap Range
         ttk.Label(control_frame, text="Colormap Range:").pack(anchor='w')
@@ -208,6 +575,7 @@ class FilmApp(tk.Tk):
         ttk.Entry(cmap_frame, textvariable=self.cmap_max_var, width=6).pack(side=tk.LEFT, padx=2)
 
         ttk.Button(control_frame, text="Apply Calibration / Show Dose", command=self.apply_calibration).pack(pady=10, fill=tk.X)
+
 
         ttk.Separator(control_frame, orient='horizontal').pack(fill='x', pady=10)
 
@@ -363,55 +731,85 @@ class FilmApp(tk.Tk):
     def _load_config(self):
         self.profiles = {}
         self.current_profile = "Default"
-        
+
         if os.path.exists(self.config_file):
             try:
                 with open(self.config_file, 'r') as f:
                     data = json.load(f)
-                    
-                # Migration check
+
                 if 'profiles' in data:
                     self.profiles = data['profiles']
                     self.current_profile = data.get('current', "Default")
                 else:
                     # Migrate old flat config
+                    ch = data.get('color_channel', 'Green')
                     old_profile = {
-                        'a': data.get('a', 0.0),
-                        'b': data.get('b', 1000.0),
-                        'c': data.get('c', 0.0),
-                        'color_channel': data.get('color_channel', 'Green')
+                        'name': 'Default',
+                        'note': '',
+                        'color_channel': ch,
+                        'channels': {
+                            ch: {'a': data.get('a', 0.0), 'b': data.get('b', 1000.0), 'c': data.get('c', 0.0)}
+                        }
                     }
                     self.profiles = {"Default": old_profile}
                     self.current_profile = "Default"
+
+                # Migrate any old-format profiles (have top-level a/b/c but no channels dict)
+                for name, p in self.profiles.items():
+                    if 'channels' not in p:
+                        ch = p.get('color_channel', 'Green')
+                        p['channels'] = {
+                            ch: {'a': p.get('a', 0.0), 'b': p.get('b', 1000.0), 'c': p.get('c', 0.0)}
+                        }
+                        p.setdefault('name', name)
+                        p.setdefault('note', '')
+                        # Remove old top-level keys
+                        for key in ('a', 'b', 'c'):
+                            p.pop(key, None)
             except:
-                pass 
-        
+                pass
+
         # Ensure at least one profile
         if not self.profiles:
-             self.profiles = {"Default": {'a':0.0, 'b':1000.0, 'c':0.0, 'color_channel':'Green'}}
+            self.profiles = {"Default": {
+                'name': 'Default', 'note': '', 'color_channel': 'Green',
+                'channels': {'Green': {'a': 0.0, 'b': 1000.0, 'c': 0.0}}
+            }}
 
     def _save_config(self):
         # Update current profile data from UI
         name = self.profile_var.get()
-        if not name: name = "Default"
-        
-        self.profiles[name] = {
+        if not name:
+            name = "Default"
+
+        ch = self.channel_var.get()
+
+        # Get or create profile
+        if name not in self.profiles:
+            self.profiles[name] = {
+                'name': name, 'note': '', 'color_channel': ch, 'channels': {}
+            }
+
+        p = self.profiles[name]
+        p['color_channel'] = ch
+
+        # Update the current channel's params
+        if 'channels' not in p:
+            p['channels'] = {}
+        p['channels'][ch] = {
             'a': self.a_var.get(),
             'b': self.b_var.get(),
-            'c': self.c_var.get(),
-            'color_channel': self.channel_var.get()
+            'c': self.c_var.get()
         }
-        
+
         data = {
             'profiles': self.profiles,
             'current': name
         }
-        
+
         try:
             with open(self.config_file, 'w') as f:
                 json.dump(data, f, indent=4)
-            
-            # Update list if new
             self.update_profile_list(name)
         except Exception as e:
             print(f"Failed to save config: {e}")
@@ -428,10 +826,46 @@ class FilmApp(tk.Tk):
         name = self.profile_var.get()
         if name in self.profiles:
             p = self.profiles[name]
-            self.a_var.set(p.get('a', 0.0))
-            self.b_var.set(p.get('b', 1000.0))
-            self.c_var.set(p.get('c', 0.0))
-            self.channel_var.set(p.get('color_channel', 'Green'))
+            ch = p.get('color_channel', 'Green')
+            self.channel_var.set(ch)
+            self._load_channel_params(p, ch)
+
+            # Update name/note display
+            display_name = p.get('name', name)
+            note = p.get('note', '')
+            tip = display_name
+            if note:
+                tip += f" — {note}"
+            self.profile_note_label.config(text=tip)
+
+    def on_channel_change(self, event=None):
+        name = self.profile_var.get()
+        if name in self.profiles:
+            p = self.profiles[name]
+            ch = self.channel_var.get()
+            self._load_channel_params(p, ch)
+
+    def _load_channel_params(self, profile, channel):
+        channels = profile.get('channels', {})
+        if channel in channels:
+            ch_data = channels[channel]
+            self.a_var.set(ch_data.get('a', 0.0))
+            self.b_var.set(ch_data.get('b', 1000.0))
+            self.c_var.set(ch_data.get('c', 0.0))
+        else:
+            # Channel not calibrated — use first available or defaults
+            if channels:
+                first = next(iter(channels.values()))
+                self.a_var.set(first.get('a', 0.0))
+                self.b_var.set(first.get('b', 1000.0))
+                self.c_var.set(first.get('c', 0.0))
+            else:
+                self.a_var.set(0.0)
+                self.b_var.set(1000.0)
+                self.c_var.set(0.0)
+
+    def open_calibration_wizard(self):
+        CalibrationWizard(self)
 
     # --- Interaction ---
     def on_select(self, eclick, erelease):

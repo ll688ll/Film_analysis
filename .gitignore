@@ -1,0 +1,7 @@
+/__pycache__/
+/dist/
+/build/
+/calibration_config.json
+/.claude/
+/.venv/
+*.spec
