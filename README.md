@@ -1,117 +1,265 @@
 # Radiation Film Analysis Tool
 
-**Version 1.0.0**
+A web-based application for analyzing radiochromic film dosimetry scans. Converts scanned film images into dose maps using rational function calibration, with interactive visualization and ROI analysis.
 
-A desktop application for radiochromic film dosimetry analysis. Load scanned film images, apply calibration curves to convert pixel values to dose, and analyze regions of interest (ROI) with detailed statistics.
-
-## Quick Start (Standalone Exe)
-
-Download `RadiationFilmAnalysis.exe` from the `dist/` folder and run it. No Python installation required.
-
-## Development Setup
-
-### Requirements
-
-- Python 3.8+
-- Dependencies: `numpy`, `Pillow`, `matplotlib`, `scipy`
-
-```bash
-pip install numpy Pillow matplotlib scipy
-```
-
-### Run from source
-
-```bash
-python main.py
-```
-
-### Build standalone exe
-
-```bash
-pip install pyinstaller
-python build.py
-```
-
-The exe will be created at `dist/RadiationFilmAnalysis.exe`. The `calibration_config.json` file is created automatically on first run in the same directory as the exe.
+Originally built as a desktop tkinter application (`main.py`), now extended with a full web stack: React frontend + FastAPI backend + PostgreSQL, deployable via Docker Compose.
 
 ## Features
 
-### Film Analysis
+- **User management** — Register/login with JWT authentication; all data is isolated per user account
+- **Calibration wizard** — Upload calibration film scans, select ROI regions at known dose levels, fit rational function curves (Red/Green/Blue channels), and save reusable calibration profiles
+- **Film analysis** — Upload irradiated film scans, apply a calibration profile to generate dose maps, interactively explore dose values with cursor readout
+- **ROI tools** — Rectangle, Circle, and Ring ROI shapes with drag, resize, and rotation; computes dose statistics (mean, min, max, std, CV, DUR, flatness) with physical dimensions (mm)
+- **Interactive dose map** — Client-side Canvas rendering with selectable colormaps (jet, viridis, hot), adjustable dose range, and real-time cursor dose readout
+- **History** — Browse and review saved analysis sessions
+- **CSV export** — Export ROI measurement data
+- **Legacy import** — Import calibration profiles from the desktop app's `calibration_config.json`
 
-1. **Load Film Scan** -- Open a scanned film image (TIF, PNG, JPG).
-2. **Set DPI** -- Extracted automatically from image metadata, or enter manually. Used for physical measurement conversions.
-3. **Select Calibration Profile** -- Choose from saved calibration profiles. Each profile stores parameters for Red, Green, and Blue channels.
-4. **Select Channel** -- Pick Red, Green, Blue, or Gray. Parameters (a, b, c) auto-update when switching channels if the profile has per-channel calibration data.
-5. **Apply Calibration / Show Dose** -- Converts the image to a dose map using the rational function model and displays it with a jet colormap.
-6. **ROI Analysis** -- Draw an ROI on the dose map and get statistics:
-   - **Rectangle** -- Axis-aligned or rotated (0-360 degrees)
-   - **Circle** -- Elliptical region
-   - **Ring** -- Annular region with adjustable hole ratio
+## Calibration Model
 
-#### ROI Statistics
+The calibration uses a rational function model:
 
-| Metric | Description |
-|---|---|
-| Max / Min / Mean / Std | Dose values (trimmed 1-99 percentile) |
-| CV (%) | Coefficient of variation |
-| DUR | Dose uniformity ratio (Max/Min) |
-| Flatness (%) | (Max - Min) / (Max + Min) x 100 |
-| Center X/Y | ROI center position in mm |
-| Width / Height | ROI dimensions in mm |
-| Area | Effective ROI area in mm^2 |
+- **Forward model** (curve fitting): `Color% = a + b / (Dose - c)`
+- **Inverse model** (dose calculation): `Dose = b / (Color% - a) + c`
+
+Where `Color% = pixel_value / 255.0` (0–1 range). Curves are fitted independently for Red, Green, and Blue channels using `scipy.optimize.curve_fit`.
+
+## Architecture
+
+```
+┌─────────────┐       ┌──────────────┐       ┌──────────────┐
+│   Nginx     │──────>│   FastAPI     │──────>│  PostgreSQL  │
+│  (port 80)  │       │  (port 8000)  │       │  (port 5432) │
+│  SPA + proxy│       │  REST API     │       │  User data   │
+└─────────────┘       └──────────────┘       └──────────────┘
+```
+
+**Backend** (Python 3.11):
+- FastAPI with async SQLAlchemy 2.0 + asyncpg
+- JWT authentication (python-jose + passlib/bcrypt)
+- NumPy/SciPy/Pillow for image processing and curve fitting
+- In-memory image cache with TTL-based cleanup
+
+**Frontend** (TypeScript):
+- React 18 + React Router + Vite
+- Tailwind CSS for styling
+- react-konva for canvas-based image display and ROI interaction
+- Plotly.js for calibration curve charts
+- Client-side dose map rendering with Canvas API
+- Axios with JWT interceptor
+
+**Database** (PostgreSQL 16):
+- Users, calibration profiles, channel parameters, calibration points, analysis sessions, ROI measurements
+
+## Project Structure
+
+```
+Film_analysis/
+├── main.py                    # Original desktop tkinter app (standalone)
+├── calibration_config.json    # Desktop app calibration data
+├── docker-compose.yml         # Docker Compose orchestration
+├── .env.example               # Environment variable template
+│
+├── backend/
+│   ├── Dockerfile
+│   ├── requirements.txt
+│   └── app/
+│       ├── main.py            # FastAPI app entry point, CORS, lifespan
+│       ├── config.py          # Settings (env vars)
+│       ├── database.py        # Async SQLAlchemy engine + session
+│       ├── models.py          # ORM models (User, CalibrationProfile, etc.)
+│       ├── schemas.py         # Pydantic request/response schemas
+│       ├── auth.py            # Password hashing + JWT token creation
+│       ├── dependencies.py    # get_current_user dependency
+│       ├── routers/
+│       │   ├── auth_router.py # POST /register, /login, GET /me
+│       │   ├── profiles.py    # CRUD for calibration profiles
+│       │   ├── analysis.py    # Upload, calibrate, dose map, ROI, save, export
+│       │   └── wizard.py      # Calibration wizard workflow
+│       └── services/
+│           ├── film_analyzer.py   # Dose calculation, ROI mask, statistics
+│           ├── calibration.py     # Color extraction, curve fitting
+│           └── image_utils.py     # Image loading, preview generation
+│
+├── backend/tests/
+│   ├── conftest.py            # Async test fixtures (SQLite test DB)
+│   ├── test_auth.py           # Authentication tests (10 tests)
+│   ├── test_services.py       # Service layer tests (24 tests)
+│   ├── test_analysis.py       # Analysis endpoint tests (13 tests)
+│   └── test_wizard.py         # Wizard endpoint tests (8 tests)
+│
+├── frontend/
+│   ├── Dockerfile
+│   ├── nginx.conf
+│   ├── package.json
+│   └── src/
+│       ├── main.tsx           # App entry point
+│       ├── App.tsx            # Routes and context providers
+│       ├── api/client.ts      # Axios instance with JWT interceptor
+│       ├── auth/              # Login, Register pages, AuthContext
+│       ├── analysis/          # Analysis page, ImageCanvas, ROI, dose map
+│       │   ├── AnalysisPage.tsx
+│       │   ├── ImageCanvas.tsx
+│       │   ├── CalibrationPanel.tsx
+│       │   ├── StatsPanel.tsx
+│       │   ├── ROIControls.tsx
+│       │   ├── colormaps.ts
+│       │   └── useDoseMap.ts
+│       ├── wizard/            # Calibration wizard page
+│       │   ├── WizardPage.tsx
+│       │   ├── WizardCanvas.tsx
+│       │   └── CurveChart.tsx
+│       ├── history/           # Analysis history page
+│       └── components/        # Layout, ProtectedRoute, ProtectedTabs
+│
+└── test/
+    └── CAL_007.tif            # Sample calibration film scan
+```
+
+## Getting Started
+
+### Prerequisites
+
+- [Docker](https://docs.docker.com/get-docker/) and Docker Compose
+
+### Quick Start
+
+1. **Clone and configure environment:**
+
+   ```bash
+   cp .env.example .env
+   # Edit .env and set a strong SECRET_KEY for production
+   ```
+
+2. **Build and start all services:**
+
+   ```bash
+   docker compose up --build
+   ```
+
+3. **Access the application:**
+   - Web UI: http://localhost
+   - API docs: http://localhost:8000/docs
+
+4. **Create an account** via the Register page, then log in.
+
+### Local Development (without Docker)
+
+**Backend:**
+
+```bash
+cd backend
+python -m venv .venv
+source .venv/bin/activate    # or .venv\Scripts\activate on Windows
+pip install -r requirements.txt
+
+# Set environment variables
+export DATABASE_URL="postgresql+asyncpg://filmuser:filmpass@localhost:5432/filmanalysis"
+export SECRET_KEY="dev-secret-key"
+
+uvicorn app.main:app --reload --port 8000
+```
+
+**Frontend:**
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+The Vite dev server proxies `/api` requests to `http://localhost:8000`.
+
+### Running Tests
+
+```bash
+cd backend
+pip install -r requirements.txt
+pytest -v
+```
+
+Tests use an in-memory SQLite database (via aiosqlite) so no PostgreSQL instance is needed.
+
+## API Reference
+
+All endpoints are prefixed with `/api`. Protected endpoints require a `Bearer` token in the `Authorization` header.
+
+### Authentication
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/auth/register` | Create account (returns JWT) |
+| POST | `/api/auth/login` | Login (returns JWT) |
+| GET | `/api/auth/me` | Get current user info |
+
+### Calibration Profiles
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/profiles` | List user's calibration profiles |
+| POST | `/api/profiles` | Create a new profile |
+| GET | `/api/profiles/{id}` | Get profile details |
+| PUT | `/api/profiles/{id}` | Update a profile |
+| DELETE | `/api/profiles/{id}` | Delete a profile |
+| POST | `/api/profiles/import` | Import from legacy JSON format |
 
 ### Calibration Wizard
 
-Create new calibration profiles from multiple film scans exposed to known doses.
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/wizard/upload-image` | Upload calibration film image |
+| POST | `/api/wizard/extract-point` | Extract color percentages from ROI |
+| POST | `/api/wizard/fit-curves` | Fit calibration curves (min 3 points) |
+| POST | `/api/wizard/save-profile` | Save fitted profile to database |
 
-1. Click **Calibration Wizard...** in the main window.
-2. Enter a **Profile Name** and optional **Note** (e.g., film batch, beam energy, clinic).
-3. For each dose level:
-   - Click **Load Film Image** to open a scanned film.
-   - Enter the known **Dose (Gy)** (use 0 for unexposed reference).
-   - Draw a rectangle ROI on the film.
-   - Click **Add Point from ROI** -- the tool samples mean color values for all three channels (R, G, B) simultaneously.
-4. Repeat step 3 for at least 4 dose levels.
-5. Click **Fit Curves** -- fits the rational function to each channel and displays parameters (a, b, c) and R^2.
-6. Select the **Primary Channel** (typically Red for EBT films).
-7. Click **Save as Profile** -- the profile is immediately available in the main application.
+### Film Analysis
 
-### Calibration Model
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/api/analysis/upload` | Upload film scan for analysis |
+| GET | `/api/analysis/{id}/preview` | Get film image preview (JPEG) |
+| POST | `/api/analysis/{id}/calibrate` | Apply calibration, generate dose map |
+| GET | `/api/analysis/{id}/dose-preview` | Get dose map as PNG image |
+| GET | `/api/analysis/{id}/dose-data` | Get dose map as binary Float32 array |
+| POST | `/api/analysis/{id}/roi` | Compute ROI statistics |
+| POST | `/api/analysis/{id}/save` | Save analysis session |
+| GET | `/api/analysis/history` | List saved analysis sessions |
+| GET | `/api/analysis/{id}/export` | Export ROI measurements as CSV |
 
-The tool uses a rational function calibration model:
+### Health Check
 
-```
-Dose = b / (Color% - a) + c
-```
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/health` | Service health check |
 
-where `Color% = pixel_value / 255.0` and `a`, `b`, `c` are fitted parameters.
+## Configuration
 
-Equivalently, for curve fitting:
+Environment variables (set in `.env` or system environment):
 
-```
-Color% = a + b / (Dose - c)
-```
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SECRET_KEY` | `change-me-in-production` | JWT signing key |
+| `DATABASE_URL` | `postgresql+asyncpg://...` | Database connection string |
+| `UPLOAD_DIR` | `uploads` | File upload directory |
+| `ACCESS_TOKEN_EXPIRE_MINUTES` | `1440` | JWT token expiry (24 hours) |
+| `MAX_UPLOAD_SIZE_MB` | `200` | Maximum upload file size |
+| `IMAGE_CACHE_TTL_MINUTES` | `30` | In-memory image cache TTL |
 
-### Calibration Config
+## Desktop Application
 
-Profiles are stored in `calibration_config.json`:
+The original standalone desktop app is preserved in `main.py`. Run it directly:
 
-```json
-{
-    "profiles": {
-        "EBT4_Batch_2026": {
-            "name": "EBT4 Batch 2026",
-            "note": "100V, 10x10cm field, ABC clinic",
-            "color_channel": "Red",
-            "channels": {
-                "Red":   { "a": 0.061, "b": 8.200, "c": -12.096 },
-                "Green": { "a": 0.045, "b": 5.100, "c": -8.300 },
-                "Blue":  { "a": 0.038, "b": 3.200, "c": -5.700 }
-            }
-        }
-    },
-    "current": "EBT4_Batch_2026"
-}
+```bash
+pip install numpy scipy Pillow matplotlib
+python main.py
 ```
 
-Each profile stores per-channel calibration parameters, a default channel, and a freeform note.
+It provides the same calibration and analysis functionality via a tkinter GUI, with calibration data stored locally in `calibration_config.json`.
+
+## Supported File Formats
+
+- TIFF (`.tif`, `.tiff`) — recommended for radiochromic film scans
+- PNG (`.png`)
+- JPEG (`.jpg`, `.jpeg`)
+
+Maximum upload size: 200 MB (configurable).
