@@ -32,7 +32,7 @@ export default function ProtectedTabs() {
     <Layout>
       {/* All pages rendered simultaneously; CSS controls visibility */}
       <div className={`flex-1 flex flex-col overflow-hidden ${path === "/" ? "" : "hidden"}`}>
-        <AnalysisPage />
+        <AnalysisPage visible={path === "/"} />
       </div>
       <div className={`flex-1 flex flex-col overflow-hidden ${path === "/wizard" ? "" : "hidden"}`}>
         <WizardPage />

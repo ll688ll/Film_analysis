@@ -30,7 +30,7 @@ interface ROIData {
   rotation: number;
 }
 
-export default function AnalysisPage() {
+export default function AnalysisPage({ visible = true }: { visible?: boolean }) {
   // Session state
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [imageInfo, setImageInfo] = useState<ImageInfo | null>(null);
@@ -40,6 +40,15 @@ export default function AnalysisPage() {
 
   // Profiles
   const [profiles, setProfiles] = useState<Profile[]>([]);
+
+  // Last-applied calibration params (needed for save)
+  const [appliedCalibration, setAppliedCalibration] = useState<{
+    profile_id: number;
+    channel: string;
+    a: number;
+    b: number;
+    c: number;
+  } | null>(null);
 
   // ROI state
   const [roiType, setROIType] = useState<ROIType>("Rectangle");
@@ -74,13 +83,19 @@ export default function AnalysisPage() {
   // File input ref
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Fetch profiles on mount
-  useEffect(() => {
+  // Fetch profiles
+  const fetchProfiles = useCallback(() => {
     client
       .get<Profile[]>("/profiles")
       .then((res) => setProfiles(res.data))
       .catch(() => {});
   }, []);
+
+  // Re-fetch profiles when tab becomes visible
+  useEffect(() => {
+    if (!visible) return;
+    fetchProfiles();
+  }, [visible, fetchProfiles]);
 
   // Interactive dose map hook — cmapMin/cmapMax drive client-side re-coloring
   const { doseMapData, getDoseAt, canvasVersion } = useDoseMap({
@@ -176,6 +191,13 @@ export default function AnalysisPage() {
         setIsCalibrated(true);
         setCalibrationVersion((v) => v + 1);
         setStats(null);
+        setAppliedCalibration({
+          profile_id: params.profile_id,
+          channel: params.channel,
+          a: params.a,
+          b: params.b,
+          c: params.c,
+        });
       } catch (err: any) {
         alert(err.response?.data?.detail || "Calibration failed.");
       } finally {
@@ -231,11 +253,18 @@ export default function AnalysisPage() {
 
   // Save session
   const handleSave = useCallback(async () => {
-    if (!sessionId) return;
+    if (!sessionId || !appliedCalibration) return;
     setSaving(true);
     setSaveSuccess(false);
     try {
-      await client.post(`/analysis/${sessionId}/save`, { notes });
+      await client.post(`/analysis/${sessionId}/save`, {
+        profile_id: appliedCalibration.profile_id,
+        channel: appliedCalibration.channel,
+        a: appliedCalibration.a,
+        b: appliedCalibration.b,
+        c: appliedCalibration.c,
+        notes,
+      });
       setSaveSuccess(true);
       setTimeout(() => setSaveSuccess(false), 3000);
     } catch {
@@ -243,7 +272,7 @@ export default function AnalysisPage() {
     } finally {
       setSaving(false);
     }
-  }, [sessionId, notes]);
+  }, [sessionId, appliedCalibration, notes]);
 
   return (
     <div className="flex-1 flex overflow-hidden">
@@ -345,6 +374,7 @@ export default function AnalysisPage() {
         <CalibrationPanel
           profiles={profiles}
           onApplyCalibration={handleApplyCalibration}
+          onProfilesChange={fetchProfiles}
           disabled={!sessionId}
           loading={calibrating}
           cmapMin={cmapMin}
@@ -371,7 +401,7 @@ export default function AnalysisPage() {
         <StatsPanel stats={stats} loading={statsLoading} />
 
         {/* Save section */}
-        {sessionId && (
+        {sessionId && appliedCalibration && (
           <div className="p-4 border-t border-slate-600 mt-auto">
             <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">
               Session

@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import client from "../api/client";
 
 export interface ChannelParams {
   channel: string;
@@ -11,6 +12,8 @@ export interface Profile {
   id: number;
   name: string;
   notes?: string;
+  note?: string;
+  primary_channel?: string;
   channel_params: ChannelParams[];
 }
 
@@ -25,6 +28,7 @@ interface CalibrationPanelProps {
     cmap_min: number;
     cmap_max: number;
   }) => void;
+  onProfilesChange: () => void;
   disabled: boolean;
   loading: boolean;
   cmapMin: number;
@@ -38,6 +42,7 @@ const CHANNELS = ["Red", "Green", "Blue", "Gray"];
 export default function CalibrationPanel({
   profiles,
   onApplyCalibration,
+  onProfilesChange,
   disabled,
   loading,
   cmapMin,
@@ -50,6 +55,15 @@ export default function CalibrationPanel({
   const [a, setA] = useState(0);
   const [b, setB] = useState(0);
   const [c, setC] = useState(0);
+
+  // Edit state
+  const [editing, setEditing] = useState(false);
+  const [editName, setEditName] = useState("");
+  const [editNote, setEditNote] = useState("");
+  const [editSaving, setEditSaving] = useState(false);
+
+  // Delete confirmation
+  const [confirmDelete, setConfirmDelete] = useState(false);
 
   const selectedProfile =
     selectedProfileId !== ""
@@ -69,6 +83,12 @@ export default function CalibrationPanel({
     }
   }, [selectedProfile, channel]);
 
+  // Reset edit/delete state when profile selection changes
+  useEffect(() => {
+    setEditing(false);
+    setConfirmDelete(false);
+  }, [selectedProfileId]);
+
   const handleApply = () => {
     if (selectedProfileId === "") return;
     onApplyCalibration({
@@ -80,6 +100,47 @@ export default function CalibrationPanel({
       cmap_min: cmapMin,
       cmap_max: cmapMax,
     });
+  };
+
+  const handleStartEdit = () => {
+    if (!selectedProfile) return;
+    setEditName(selectedProfile.name);
+    setEditNote(selectedProfile.note || selectedProfile.notes || "");
+    setEditing(true);
+    setConfirmDelete(false);
+  };
+
+  const handleCancelEdit = () => {
+    setEditing(false);
+  };
+
+  const handleSaveEdit = async () => {
+    if (!selectedProfile || !editName.trim()) return;
+    setEditSaving(true);
+    try {
+      await client.put(`/profiles/${selectedProfile.id}`, {
+        name: editName.trim(),
+        note: editNote.trim(),
+      });
+      onProfilesChange();
+      setEditing(false);
+    } catch (err: any) {
+      alert(err.response?.data?.detail || "Failed to update profile.");
+    } finally {
+      setEditSaving(false);
+    }
+  };
+
+  const handleDelete = async () => {
+    if (!selectedProfile) return;
+    try {
+      await client.delete(`/profiles/${selectedProfile.id}`);
+      setSelectedProfileId("");
+      setConfirmDelete(false);
+      onProfilesChange();
+    } catch (err: any) {
+      alert(err.response?.data?.detail || "Failed to delete profile.");
+    }
   };
 
   return (
@@ -118,10 +179,89 @@ export default function CalibrationPanel({
             </select>
           </div>
 
-          {/* Profile notes */}
-          {selectedProfile?.notes && (
+          {/* Profile management buttons */}
+          {selectedProfile && !editing && (
+            <div className="flex gap-2">
+              <button
+                onClick={handleStartEdit}
+                className="flex-1 px-2 py-1.5 text-xs font-medium text-slate-300 bg-slate-700 hover:bg-slate-600 border border-slate-600 rounded transition-colors"
+              >
+                Edit Profile
+              </button>
+              {!confirmDelete ? (
+                <button
+                  onClick={() => setConfirmDelete(true)}
+                  className="px-2 py-1.5 text-xs font-medium text-red-400 bg-slate-700 hover:bg-red-900/30 border border-slate-600 rounded transition-colors"
+                >
+                  Delete
+                </button>
+              ) : (
+                <div className="flex gap-1">
+                  <button
+                    onClick={handleDelete}
+                    className="px-2 py-1.5 text-xs font-medium text-white bg-red-600 hover:bg-red-500 rounded transition-colors"
+                  >
+                    Confirm
+                  </button>
+                  <button
+                    onClick={() => setConfirmDelete(false)}
+                    className="px-2 py-1.5 text-xs font-medium text-slate-300 bg-slate-700 hover:bg-slate-600 rounded transition-colors"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Inline edit form */}
+          {editing && selectedProfile && (
+            <div className="space-y-2 bg-slate-800/50 rounded-lg p-3 border border-slate-600">
+              <div>
+                <label className="block text-xs text-slate-400 mb-1">Name</label>
+                <input
+                  type="text"
+                  value={editName}
+                  onChange={(e) => setEditName(e.target.value)}
+                  className="w-full px-2 py-1.5 text-sm bg-slate-800 border border-slate-600 rounded text-slate-200"
+                />
+              </div>
+              <div>
+                <label className="block text-xs text-slate-400 mb-1">Note</label>
+                <textarea
+                  value={editNote}
+                  onChange={(e) => setEditNote(e.target.value)}
+                  rows={2}
+                  className="w-full px-2 py-1.5 text-sm bg-slate-800 border border-slate-600 rounded text-slate-200 resize-none"
+                />
+              </div>
+              <div className="flex gap-2">
+                <button
+                  onClick={handleSaveEdit}
+                  disabled={editSaving || !editName.trim()}
+                  className="flex-1 px-2 py-1.5 text-xs font-medium text-white bg-sky-600 hover:bg-sky-500 disabled:bg-slate-600 disabled:text-slate-400 disabled:cursor-not-allowed rounded transition-colors"
+                >
+                  {editSaving ? "Saving..." : "Save"}
+                </button>
+                <button
+                  onClick={handleCancelEdit}
+                  className="px-2 py-1.5 text-xs font-medium text-slate-300 bg-slate-700 hover:bg-slate-600 rounded transition-colors"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Profile notes (when not editing) */}
+          {!editing && selectedProfile?.notes && (
             <div className="text-xs text-slate-400 bg-slate-800/50 rounded px-2 py-1.5 border border-slate-600">
               {selectedProfile.notes}
+            </div>
+          )}
+          {!editing && !selectedProfile?.notes && selectedProfile?.note && (
+            <div className="text-xs text-slate-400 bg-slate-800/50 rounded px-2 py-1.5 border border-slate-600">
+              {selectedProfile.note}
             </div>
           )}
 
