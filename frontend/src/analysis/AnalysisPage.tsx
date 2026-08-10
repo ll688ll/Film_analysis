@@ -4,6 +4,7 @@ import CalibrationPanel, { type Profile } from "./CalibrationPanel";
 import ROIControls, { type ROIType } from "./ROIControls";
 import StatsPanel, { type ROIStats } from "./StatsPanel";
 import ImageCanvas from "./ImageCanvas";
+import ColorBar from "./ColorBar";
 import { useDoseMap } from "./useDoseMap";
 import type { ColormapName } from "./colormaps";
 
@@ -55,6 +56,10 @@ export default function AnalysisPage({ visible = true }: { visible?: boolean }) 
   const [rotation, setRotation] = useState(0);
   const [holeRatio, setHoleRatio] = useState(50);
   const [threshold, setThreshold] = useState(0);
+  const [trimEnabled, setTrimEnabled] = useState(false);
+  const [trimPercent, setTrimPercent] = useState(2);
+  const [cornerCutEnabled, setCornerCutEnabled] = useState(false);
+  const [cornerCutMm, setCornerCutMm] = useState(3);
   const [currentROI, setCurrentROI] = useState<ROIData | null>(null);
 
   // Stats
@@ -225,6 +230,10 @@ export default function AnalysisPage({ visible = true }: { visible?: boolean }) 
           hole_ratio: holeRatio,
           threshold,
           dpi: imageInfo?.dpi ?? 72,
+          trim_enabled: trimEnabled,
+          trim_percent: trimPercent,
+          corner_cut_enabled: roiType === "Rectangle" && cornerCutEnabled,
+          corner_cut_mm: cornerCutMm,
         });
         setStats(res.data);
       } catch (err: any) {
@@ -233,7 +242,19 @@ export default function AnalysisPage({ visible = true }: { visible?: boolean }) 
         setStatsLoading(false);
       }
     },
-    [sessionId, isCalibrated, currentROI, roiType, holeRatio, threshold, imageInfo]
+    [
+      sessionId,
+      isCalibrated,
+      currentROI,
+      roiType,
+      holeRatio,
+      threshold,
+      imageInfo,
+      trimEnabled,
+      trimPercent,
+      cornerCutEnabled,
+      cornerCutMm,
+    ]
   );
 
   // ROI change callback (debounced)
@@ -250,6 +271,16 @@ export default function AnalysisPage({ visible = true }: { visible?: boolean }) 
     },
     [isCalibrated, calculateStats]
   );
+
+  // Recalculate stats when trim / corner-cut settings change (debounced)
+  useEffect(() => {
+    if (!isCalibrated || !currentROI) return;
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(() => {
+      calculateStats();
+    }, 300);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [trimEnabled, trimPercent, cornerCutEnabled, cornerCutMm]);
 
   // Save session
   const handleSave = useCallback(async () => {
@@ -389,10 +420,18 @@ export default function AnalysisPage({ visible = true }: { visible?: boolean }) 
           rotation={rotation}
           holeRatio={holeRatio}
           threshold={threshold}
+          trimEnabled={trimEnabled}
+          trimPercent={trimPercent}
+          cornerCutEnabled={cornerCutEnabled}
+          cornerCutMm={cornerCutMm}
           onROITypeChange={setROIType}
           onRotationChange={setRotation}
           onHoleRatioChange={setHoleRatio}
           onThresholdChange={setThreshold}
+          onTrimEnabledChange={setTrimEnabled}
+          onTrimPercentChange={setTrimPercent}
+          onCornerCutEnabledChange={setCornerCutEnabled}
+          onCornerCutMmChange={setCornerCutMm}
           onCalculate={() => calculateStats()}
           disabled={!isCalibrated}
         />
@@ -441,6 +480,9 @@ export default function AnalysisPage({ visible = true }: { visible?: boolean }) 
           roiType={roiType}
           rotation={rotation}
           holeRatio={holeRatio}
+          cornerCutEnabled={cornerCutEnabled}
+          cornerCutMm={cornerCutMm}
+          dpi={imageInfo?.dpi ?? 72}
           onROIChange={handleROIChange}
           onCursorDose={handleCursorDose}
           getDoseAt={getDoseAt}
@@ -456,6 +498,17 @@ export default function AnalysisPage({ visible = true }: { visible?: boolean }) 
             <span className="text-slate-500 ml-2 text-xs">
               ({Math.round(cursorDose.x)}, {Math.round(cursorDose.y)})
             </span>
+          </div>
+        )}
+
+        {/* Dose color bar legend */}
+        {doseMapData && (
+          <div className="absolute right-3 top-1/2 -translate-y-1/2">
+            <ColorBar
+              colormap={colormap}
+              cmapMin={cmapMin}
+              cmapMax={cmapMax}
+            />
           </div>
         )}
 

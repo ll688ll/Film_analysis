@@ -104,14 +104,15 @@ class TestExtractColorPercentages:
         image = np.random.randint(0, 256, (100, 100, 3), dtype=np.uint8)
         result = extract_color_percentages(image, x=0, y=0, w=50, h=50)
         for key in ("red_pct", "green_pct", "blue_pct"):
-            assert 0.0 <= result[key] <= 100.0
+            assert 0.0 <= result[key] <= 1.0
 
     def test_known_values(self):
-        # All-white image -> each channel = 255 -> 100%
+        # All-white image -> each channel = 255/255 -> 1.0 (values are
+        # 0-1 fractions to match rational_func_calibration's pixel/255 scale)
         image = np.full((50, 50, 3), 255, dtype=np.uint8)
         result = extract_color_percentages(image, x=0, y=0, w=50, h=50)
         for key in ("red_pct", "green_pct", "blue_pct"):
-            assert result[key] == pytest.approx(100.0)
+            assert result[key] == pytest.approx(1.0)
 
     def test_black_image(self):
         image = np.zeros((50, 50, 3), dtype=np.uint8)
@@ -134,7 +135,7 @@ class TestExtractColorPercentages:
         )
         assert set(result.keys()) == {"red_pct", "green_pct", "blue_pct"}
         for v in result.values():
-            assert 0.0 <= v <= 100.0
+            assert 0.0 <= v <= 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -298,6 +299,96 @@ class TestBuildRoiMask:
         )
         assert np.sum(mask) == 0
 
+    def test_chamfer_zero_is_noop(self):
+        plain = build_roi_mask(
+            shape=(100, 100),
+            roi_type="Rectangle",
+            x=10, y=10, w=60, h=40,
+        )
+        chamfered = build_roi_mask(
+            shape=(100, 100),
+            roi_type="Rectangle",
+            x=10, y=10, w=60, h=40,
+            corner_cut_px=0,
+        )
+        assert np.array_equal(plain, chamfered)
+
+    def test_chamfer_reduces_area(self):
+        plain = build_roi_mask(
+            shape=(100, 100),
+            roi_type="Rectangle",
+            x=10, y=10, w=60, h=40,
+        )
+        chamfered = build_roi_mask(
+            shape=(100, 100),
+            roi_type="Rectangle",
+            x=10, y=10, w=60, h=40,
+            corner_cut_px=10,
+        )
+        # Each corner loses a triangle of area cut^2 / 2 = 50 -> 200 total
+        removed = np.sum(plain) - np.sum(chamfered)
+        assert 160 < removed < 280
+
+    def test_chamfer_excludes_corner_keeps_center(self):
+        mask = build_roi_mask(
+            shape=(100, 100),
+            roi_type="Rectangle",
+            x=10, y=10, w=60, h=40,
+            corner_cut_px=10,
+        )
+        # Corner pixel is cut, center remains
+        assert not mask[11, 11]
+        assert mask[30, 40]
+
+    def test_chamfer_with_rotation(self):
+        plain = build_roi_mask(
+            shape=(200, 200),
+            roi_type="Rectangle",
+            x=50, y=50, w=80, h=80,
+            rotation_deg=45,
+        )
+        chamfered = build_roi_mask(
+            shape=(200, 200),
+            roi_type="Rectangle",
+            x=50, y=50, w=80, h=80,
+            rotation_deg=45,
+            corner_cut_px=10,
+        )
+        removed = np.sum(plain) - np.sum(chamfered)
+        # 4 corners * 10^2 / 2 = 200 expected, allow discretization slack
+        assert 140 < removed < 280
+
+    def test_chamfer_clamped(self):
+        # Excessive cut clamps to min(hw, hh) = 20 instead of erasing the ROI
+        huge = build_roi_mask(
+            shape=(100, 100),
+            roi_type="Rectangle",
+            x=10, y=10, w=60, h=40,
+            corner_cut_px=1000,
+        )
+        clamped = build_roi_mask(
+            shape=(100, 100),
+            roi_type="Rectangle",
+            x=10, y=10, w=60, h=40,
+            corner_cut_px=20,
+        )
+        assert np.sum(huge) > 0
+        assert np.array_equal(huge, clamped)
+
+    def test_chamfer_ignored_for_circle(self):
+        plain = build_roi_mask(
+            shape=(200, 200),
+            roi_type="Circle",
+            x=50, y=50, w=100, h=100,
+        )
+        chamfered = build_roi_mask(
+            shape=(200, 200),
+            roi_type="Circle",
+            x=50, y=50, w=100, h=100,
+            corner_cut_px=10,
+        )
+        assert np.array_equal(plain, chamfered)
+
 
 # ---------------------------------------------------------------------------
 # film_analyzer.FilmAnalyzer
@@ -349,3 +440,37 @@ class TestFilmAnalyzer:
         result = analyzer.load_image(test_film_path)
         assert isinstance(result, np.ndarray)
         assert analyzer.image_array is not None
+
+    def test_get_roi_stats_no_trim_uses_all_pixels(self):
+        analyzer = FilmAnalyzer()
+        analyzer.dose_map = np.arange(100, dtype=float).reshape(10, 10)
+        mask = np.ones((10, 10), dtype=bool)
+        stats = analyzer.get_roi_stats(mask, trim_enabled=False)
+        assert stats["max"] == 99.0
+        assert stats["min"] == 0.0
+
+    def test_get_roi_stats_trim_two_percent(self):
+        analyzer = FilmAnalyzer()
+        analyzer.dose_map = np.arange(100, dtype=float).reshape(10, 10)
+        mask = np.ones((10, 10), dtype=bool)
+        stats = analyzer.get_roi_stats(mask, trim_enabled=True, trim_percent=2)
+        # 2% of 100 values removed from each tail
+        assert stats["min"] == 2.0
+        assert stats["max"] == 97.0
+
+    def test_get_roi_stats_trim_zero_percent_equals_disabled(self):
+        analyzer = FilmAnalyzer()
+        analyzer.dose_map = np.arange(100, dtype=float).reshape(10, 10)
+        mask = np.ones((10, 10), dtype=bool)
+        on_zero = analyzer.get_roi_stats(mask, trim_enabled=True, trim_percent=0)
+        off = analyzer.get_roi_stats(mask, trim_enabled=False)
+        assert on_zero == off
+
+    def test_get_roi_stats_trim_tiny_roi_no_crash(self):
+        analyzer = FilmAnalyzer()
+        analyzer.dose_map = np.full((10, 10), 5.0)
+        mask = np.zeros((10, 10), dtype=bool)
+        mask[0, 0] = mask[0, 1] = True
+        stats = analyzer.get_roi_stats(mask, trim_enabled=True, trim_percent=49)
+        # 49% of 2 values trims nothing (int truncation) — must not crash
+        assert stats is None or isinstance(stats, dict)

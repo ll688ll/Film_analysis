@@ -13,6 +13,9 @@ export interface ROIStats {
   width_mm: number;
   height_mm: number;
   area_mm2: number;
+  trim_enabled?: boolean;
+  trim_percent?: number;
+  corner_cut_mm?: number;
 }
 
 interface StatsPanelProps {
@@ -102,6 +105,21 @@ export default function StatsPanel({ stats, loading }: StatsPanelProps) {
             </tbody>
           </table>
         </div>
+      )}
+
+      {!loading && stats && (stats.trim_enabled || (stats.corner_cut_mm ?? 0) > 0) && (
+        <p className="mt-2 text-xs text-slate-500">
+          {[
+            stats.trim_enabled
+              ? `Trimmed ${stats.trim_percent}% per tail`
+              : null,
+            (stats.corner_cut_mm ?? 0) > 0
+              ? `Corners removed: ${stats.corner_cut_mm} mm`
+              : null,
+          ]
+            .filter(Boolean)
+            .join(" · ")}
+        </p>
       )}
     </div>
   );

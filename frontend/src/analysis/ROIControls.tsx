@@ -5,10 +5,18 @@ interface ROIControlsProps {
   rotation: number;
   holeRatio: number;
   threshold: number;
+  trimEnabled: boolean;
+  trimPercent: number;
+  cornerCutEnabled: boolean;
+  cornerCutMm: number;
   onROITypeChange: (type: ROIType) => void;
   onRotationChange: (deg: number) => void;
   onHoleRatioChange: (ratio: number) => void;
   onThresholdChange: (val: number) => void;
+  onTrimEnabledChange: (enabled: boolean) => void;
+  onTrimPercentChange: (pct: number) => void;
+  onCornerCutEnabledChange: (enabled: boolean) => void;
+  onCornerCutMmChange: (mm: number) => void;
   onCalculate: () => void;
   disabled: boolean;
 }
@@ -20,10 +28,18 @@ export default function ROIControls({
   rotation,
   holeRatio,
   threshold,
+  trimEnabled,
+  trimPercent,
+  cornerCutEnabled,
+  cornerCutMm,
   onROITypeChange,
   onRotationChange,
   onHoleRatioChange,
   onThresholdChange,
+  onTrimEnabledChange,
+  onTrimPercentChange,
+  onCornerCutEnabledChange,
+  onCornerCutMmChange,
   onCalculate,
   disabled,
 }: ROIControlsProps) {
@@ -116,6 +132,71 @@ export default function ROIControls({
           </div>
         </div>
       )}
+
+      {/* Corner removal (Rectangle only) */}
+      {roiType === "Rectangle" && (
+        <div className="mb-3">
+          <label className="flex items-center gap-2 text-xs text-slate-400 mb-1 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={cornerCutEnabled}
+              onChange={(e) => onCornerCutEnabledChange(e.target.checked)}
+              disabled={disabled}
+              className="accent-sky-500"
+            />
+            Remove corners
+          </label>
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-slate-500 flex-1">
+              Corner length (mm)
+            </span>
+            <input
+              type="number"
+              min={0}
+              step={0.5}
+              value={cornerCutMm}
+              onChange={(e) =>
+                onCornerCutMmChange(Math.max(0, Number(e.target.value)))
+              }
+              disabled={disabled || !cornerCutEnabled}
+              className="w-16 px-2 py-1 text-xs bg-slate-800 border border-slate-600 rounded text-slate-200 text-right disabled:opacity-50"
+            />
+          </div>
+        </div>
+      )}
+
+      {/* Remove max/min (trim) */}
+      <div className="mb-3">
+        <label className="flex items-center gap-2 text-xs text-slate-400 mb-1 cursor-pointer">
+          <input
+            type="checkbox"
+            checked={trimEnabled}
+            onChange={(e) => onTrimEnabledChange(e.target.checked)}
+            disabled={disabled}
+            className="accent-sky-500"
+          />
+          Remove max/min values
+        </label>
+        <div className="flex items-center gap-2">
+          <span className="text-xs text-slate-500 flex-1">
+            % per tail
+          </span>
+          <input
+            type="number"
+            min={0}
+            max={49}
+            step={0.5}
+            value={trimPercent}
+            onChange={(e) =>
+              onTrimPercentChange(
+                Math.max(0, Math.min(49, Number(e.target.value)))
+              )
+            }
+            disabled={disabled || !trimEnabled}
+            className="w-16 px-2 py-1 text-xs bg-slate-800 border border-slate-600 rounded text-slate-200 text-right disabled:opacity-50"
+          />
+        </div>
+      </div>
 
       {/* Threshold */}
       <div className="mb-4">

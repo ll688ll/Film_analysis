@@ -1,5 +1,5 @@
 import { useRef, useState, useEffect, useCallback } from "react";
-import { Stage, Layer, Image as KonvaImage, Rect, Ellipse, Transformer } from "react-konva";
+import { Stage, Layer, Image as KonvaImage, Rect, Ellipse, Line, Transformer } from "react-konva";
 import Konva from "konva";
 import type { ROIType } from "./ROIControls";
 
@@ -23,6 +23,10 @@ interface ImageCanvasProps {
   roiType: ROIType;
   rotation: number;
   holeRatio: number;
+  /** Rectangle corner removal: draw chamfered outline when enabled */
+  cornerCutEnabled: boolean;
+  cornerCutMm: number;
+  dpi: number;
   onROIChange: (roi: ROIData) => void;
   /** Called with dose value at cursor position, or null when cursor leaves image */
   onCursorDose?: (dose: number | null, x: number, y: number) => void;
@@ -39,6 +43,9 @@ export default function ImageCanvas({
   roiType,
   rotation,
   holeRatio,
+  cornerCutEnabled,
+  cornerCutMm,
+  dpi,
   onROIChange,
   onCursorDose,
   getDoseAt,
@@ -357,6 +364,37 @@ export default function ImageCanvas({
                 onDragEnd={handleDragEnd}
                 onTransformEnd={handleTransformEnd}
               />
+              {cornerCutEnabled && cornerCutMm > 0 && (() => {
+                // mm -> image px -> canvas px; same clamp as the backend
+                const c = Math.min(
+                  ((cornerCutMm * dpi) / 25.4) * scale,
+                  roi.w / 2,
+                  roi.h / 2
+                );
+                const pts = [
+                  c, 0,
+                  roi.w - c, 0,
+                  roi.w, c,
+                  roi.w, roi.h - c,
+                  roi.w - c, roi.h,
+                  c, roi.h,
+                  0, roi.h - c,
+                  0, c,
+                ];
+                return (
+                  <Line
+                    x={roi.x}
+                    y={roi.y}
+                    rotation={roi.rotation}
+                    points={pts}
+                    closed
+                    stroke="#f97316"
+                    strokeWidth={1.5}
+                    dash={[4, 3]}
+                    listening={false}
+                  />
+                );
+              })()}
               <Transformer
                 ref={(node: Konva.Transformer | null) => { trRef.current = node; }}
                 rotateEnabled

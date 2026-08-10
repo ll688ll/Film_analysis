@@ -22,7 +22,7 @@ def rational_func_calibration(pixel_val, a, b, c):
 
 def build_roi_mask(shape, roi_type, x, y, w, h,
                    rotation_deg=0, hole_ratio=50, threshold=0,
-                   dose_map=None):
+                   dose_map=None, corner_cut_px=0.0):
     """
     Build a boolean ROI mask over a 2-D grid of the given *shape* (rows, cols).
 
@@ -44,6 +44,10 @@ def build_roi_mask(shape, roi_type, x, y, w, h,
         If > 0, pixels with dose <= threshold are excluded.
     dose_map : np.ndarray or None
         Required when *threshold* > 0.
+    corner_cut_px : float
+        If > 0 for Rectangle ROIs, a 45-degree chamfer with legs of this
+        length (in pixels) is cut from each corner. Clamped to half the
+        shorter side.
 
     Returns
     -------
@@ -54,18 +58,22 @@ def build_roi_mask(shape, roi_type, x, y, w, h,
     Y, X = np.ogrid[:rows, :cols]
 
     if roi_type == "Rectangle":
+        cx, cy = x + w / 2, y + h / 2
+        hw, hh = w / 2, h / 2
         if rotation_deg == 0:
-            mask = (X >= x) & (X <= x + w) & (Y >= y) & (Y <= y + h)
+            u, v = X - cx, Y - cy
         else:
-            cx, cy = x + w / 2, y + h / 2
-            hw, hh = w / 2, h / 2
             rad = -np.radians(rotation_deg)
             cos_a, sin_a = np.cos(rad), np.sin(rad)
-            dX = X - cx
-            dY = Y - cy
-            rotX = dX * cos_a - dY * sin_a
-            rotY = dX * sin_a + dY * cos_a
-            mask = (rotX >= -hw) & (rotX <= hw) & (rotY >= -hh) & (rotY <= hh)
+            u = (X - cx) * cos_a - (Y - cy) * sin_a
+            v = (X - cx) * sin_a + (Y - cy) * cos_a
+        mask = (np.abs(u) <= hw) & (np.abs(v) <= hh)
+        if corner_cut_px > 0:
+            # Chamfer: cut a right triangle with legs of length *cut*
+            # at each corner. (hw - |u|) and (hh - |v|) are the distances
+            # to the two nearest edges in the rectangle's local frame.
+            cut = min(float(corner_cut_px), hw, hh)
+            mask = mask & (((hw - np.abs(u)) + (hh - np.abs(v))) >= cut)
     else:
         cx, cy = x + w / 2, y + h / 2
         rx, ry = w / 2, h / 2
@@ -133,12 +141,14 @@ class FilmAnalyzer:
         self.dose_map = rational_func_calibration(arr, a, b, c)
         return self.dose_map
 
-    def get_roi_stats(self, roi_mask):
+    def get_roi_stats(self, roi_mask, trim_enabled=False, trim_percent=2.0):
         """
         Compute descriptive statistics for the dose map within the
         given boolean *roi_mask*.
 
-        The outer 1 % on each tail is trimmed before computing stats.
+        When *trim_enabled* is True, *trim_percent* % of the values are
+        removed from each tail (lowest and highest doses) before the
+        statistics are computed. Otherwise all pixels are used.
 
         Returns
         -------
@@ -153,9 +163,13 @@ class FilmAnalyzer:
             return None
 
         sorted_dose = np.sort(masked_dose.flatten())
-        lo = int(len(sorted_dose) * 0.01)
-        hi = int(len(sorted_dose) * 0.99)
-        trimmed = sorted_dose[lo:hi]
+        if trim_enabled and trim_percent > 0:
+            frac = min(max(float(trim_percent), 0.0), 49.0) / 100.0
+            lo = int(len(sorted_dose) * frac)
+            hi = int(len(sorted_dose) * (1.0 - frac))
+            trimmed = sorted_dose[lo:hi]
+        else:
+            trimmed = sorted_dose
 
         if trimmed.size == 0:
             return None

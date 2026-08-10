@@ -98,7 +98,10 @@ async def auth_client(client: AsyncClient):
 # Test film fixture
 # ---------------------------------------------------------------------------
 
-TEST_FILM_PATH = r"d:\LocProj\playground\Film_analysis\test\CAL_007.tif"
+TEST_FILM_PATH = os.environ.get(
+    "TEST_FILM_PATH",
+    str(Path(__file__).resolve().parents[2] / "test" / "CAL_007.tif"),
+)
 
 
 @pytest.fixture

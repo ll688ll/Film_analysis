@@ -192,6 +192,87 @@ async def test_roi_circle(auth_client: AsyncClient, test_film_path: str):
     assert data["roi_type"] == "Circle"
 
 
+async def test_roi_trim_narrows_range(auth_client: AsyncClient, test_film_path: str):
+    upload_data = await _upload_film(auth_client, test_film_path)
+    session_id = upload_data["session_id"]
+    await _calibrate(auth_client, session_id)
+
+    roi = {"roi_type": "Rectangle", "x": 10, "y": 10, "w": 50, "h": 50}
+    resp_all = await auth_client.post(f"/api/analysis/{session_id}/roi", json=roi)
+    resp_trim = await auth_client.post(
+        f"/api/analysis/{session_id}/roi",
+        json={**roi, "trim_enabled": True, "trim_percent": 2},
+    )
+    assert resp_all.status_code == 200
+    assert resp_trim.status_code == 200
+    all_data = resp_all.json()
+    trim_data = resp_trim.json()
+    assert trim_data["max"] <= all_data["max"]
+    assert trim_data["min"] >= all_data["min"]
+    assert trim_data["trim_enabled"] is True
+    assert trim_data["trim_percent"] == 2
+
+
+async def test_roi_trim_percent_out_of_range(
+    auth_client: AsyncClient, test_film_path: str
+):
+    upload_data = await _upload_film(auth_client, test_film_path)
+    session_id = upload_data["session_id"]
+    await _calibrate(auth_client, session_id)
+
+    resp = await auth_client.post(
+        f"/api/analysis/{session_id}/roi",
+        json={
+            "roi_type": "Rectangle",
+            "x": 10, "y": 10, "w": 50, "h": 50,
+            "trim_enabled": True,
+            "trim_percent": 60,
+        },
+    )
+    assert resp.status_code == 422
+
+
+async def test_roi_corner_cut_reduces_area(
+    auth_client: AsyncClient, test_film_path: str
+):
+    upload_data = await _upload_film(auth_client, test_film_path)
+    session_id = upload_data["session_id"]
+    await _calibrate(auth_client, session_id)
+
+    roi = {"roi_type": "Rectangle", "x": 10, "y": 10, "w": 50, "h": 50}
+    resp_plain = await auth_client.post(f"/api/analysis/{session_id}/roi", json=roi)
+    resp_cut = await auth_client.post(
+        f"/api/analysis/{session_id}/roi",
+        json={**roi, "corner_cut_enabled": True, "corner_cut_mm": 2},
+    )
+    assert resp_plain.status_code == 200
+    assert resp_cut.status_code == 200
+    plain = resp_plain.json()
+    cut = resp_cut.json()
+    assert cut["pixel_count"] < plain["pixel_count"]
+    assert cut["area_mm2"] < plain["area_mm2"]
+    assert cut["corner_cut_mm"] == 2
+
+
+async def test_roi_corner_cut_ignored_for_circle(
+    auth_client: AsyncClient, test_film_path: str
+):
+    upload_data = await _upload_film(auth_client, test_film_path)
+    session_id = upload_data["session_id"]
+    await _calibrate(auth_client, session_id)
+
+    roi = {"roi_type": "Circle", "x": 10, "y": 10, "w": 60, "h": 60}
+    resp_plain = await auth_client.post(f"/api/analysis/{session_id}/roi", json=roi)
+    resp_cut = await auth_client.post(
+        f"/api/analysis/{session_id}/roi",
+        json={**roi, "corner_cut_enabled": True, "corner_cut_mm": 2},
+    )
+    assert resp_plain.status_code == 200
+    assert resp_cut.status_code == 200
+    assert resp_cut.json()["pixel_count"] == resp_plain.json()["pixel_count"]
+    assert resp_cut.json()["corner_cut_mm"] == 0.0
+
+
 async def test_roi_before_calibration(auth_client: AsyncClient, test_film_path: str):
     upload_data = await _upload_film(auth_client, test_film_path)
     session_id = upload_data["session_id"]

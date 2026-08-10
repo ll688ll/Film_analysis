@@ -11,7 +11,7 @@ from typing import Any
 import numpy as np
 from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, status
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -56,6 +56,10 @@ class ROIRequest(BaseModel):
     hole_ratio: float = 50
     threshold: float = 0
     dpi: float | None = None
+    trim_enabled: bool = False
+    trim_percent: float = Field(default=2.0, ge=0, lt=50)
+    corner_cut_enabled: bool = False
+    corner_cut_mm: float = Field(default=0.0, ge=0)
 
 
 class SaveRequest(BaseModel):
@@ -274,6 +278,14 @@ async def compute_roi(
     dose_map: np.ndarray = entry["dose_map"]
     dpi = body.dpi if body.dpi is not None else entry["dpi"]
 
+    corner_cut_px = 0.0
+    if (
+        body.roi_type == "Rectangle"
+        and body.corner_cut_enabled
+        and body.corner_cut_mm > 0
+    ):
+        corner_cut_px = body.corner_cut_mm * dpi / 25.4
+
     mask = build_roi_mask(
         shape=dose_map.shape,
         roi_type=body.roi_type,
@@ -285,11 +297,16 @@ async def compute_roi(
         hole_ratio=body.hole_ratio,
         threshold=body.threshold,
         dose_map=dose_map,
+        corner_cut_px=corner_cut_px,
     )
 
     analyzer = FilmAnalyzer()
     analyzer.dose_map = dose_map
-    stats = analyzer.get_roi_stats(mask)
+    stats = analyzer.get_roi_stats(
+        mask,
+        trim_enabled=body.trim_enabled,
+        trim_percent=body.trim_percent,
+    )
 
     if stats is None:
         raise HTTPException(
@@ -315,6 +332,11 @@ async def compute_roi(
     stats["height_mm"] = round(height_mm, 2)
     stats["dpi"] = dpi
     stats["roi_type"] = body.roi_type
+    stats["trim_enabled"] = body.trim_enabled
+    stats["trim_percent"] = body.trim_percent
+    stats["corner_cut_mm"] = (
+        body.corner_cut_mm if corner_cut_px > 0 else 0.0
+    )
 
     return stats
 
