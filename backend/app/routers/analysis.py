@@ -3,10 +3,7 @@
 from __future__ import annotations
 
 import io
-import uuid
-from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, status
@@ -16,15 +13,20 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app.config import settings
 from app.database import get_db
 from app.dependencies import get_current_user
 from app.models import AnalysisSession, CalibrationProfile, ChannelParams, User
 from app.services.film_analyzer import FilmAnalyzer, build_roi_mask
+from app.services.image_io import read_dpi
 from app.services.image_utils import (
     generate_dose_map_preview,
     generate_preview,
     load_image,
+)
+from app.services.session_cache import (
+    get_cache_entry,
+    put_cache_entry,
+    save_upload,
 )
 
 router = APIRouter(prefix="/analysis", tags=["analysis"])
@@ -75,16 +77,9 @@ class SaveRequest(BaseModel):
 # Cache helpers
 # ---------------------------------------------------------------------------
 
-def _get_cache_entry(request: Request, session_id: str) -> dict:
-    cache: dict = request.app.state.image_cache
-    entry = cache.get(session_id)
-    if entry is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Session not found or expired",
-        )
-    entry["last_accessed"] = datetime.now(timezone.utc)
-    return entry
+def _get_cache_entry(request: Request, session_id: str, user_id: int) -> dict:
+    """Fetch the cache entry for *session_id*, scoped to its owner."""
+    return get_cache_entry(request, session_id, user_id)
 
 
 # ---------------------------------------------------------------------------
@@ -97,43 +92,25 @@ async def upload_image(
     request: Request,
     current_user: User = Depends(get_current_user),
 ):
-    # Validate extension
-    suffix = Path(file.filename or "").suffix.lower()
-    if suffix not in ALLOWED_EXTENSIONS:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Unsupported file type '{suffix}'. Allowed: {', '.join(ALLOWED_EXTENSIONS)}",
-        )
-
-    # Read file contents
-    contents = await file.read()
-    if len(contents) > settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024:
-        raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail=f"File exceeds {settings.MAX_UPLOAD_SIZE_MB} MB limit",
-        )
-
-    # Persist to disk
-    user_dir = Path(settings.UPLOAD_DIR) / str(current_user.id)
-    user_dir.mkdir(parents=True, exist_ok=True)
-
-    session_id = str(uuid.uuid4())
-    save_path = user_dir / f"{session_id}{suffix}"
-    save_path.write_bytes(contents)
+    session_id, save_path = await save_upload(
+        file, current_user.id, ALLOWED_EXTENSIONS
+    )
 
     # Load image into memory
     image_array, dpi, _w, _h, _ch = load_image(str(save_path))
+    _dpi, has_dpi = read_dpi(str(save_path))
 
-    # Store in cache
-    cache: dict = request.app.state.image_cache
-    cache[session_id] = {
-        "image_array": image_array,
-        "dose_map": None,
-        "dpi": dpi,
-        "last_accessed": datetime.now(timezone.utc),
-        "file_path": str(save_path),
-        "user_id": current_user.id,
-    }
+    put_cache_entry(
+        request,
+        session_id,
+        image_array=image_array,
+        dpi=dpi,
+        file_path=str(save_path),
+        user_id=current_user.id,
+        # Recorded so the image-analysis page can tell a real scan DPI from
+        # the 72.0 fallback if this session is shared across tabs.
+        has_dpi=has_dpi,
+    )
 
     h, w = image_array.shape[:2]
     channels = image_array.shape[2] if image_array.ndim == 3 else 1
@@ -154,7 +131,7 @@ async def preview_image(
     request: Request,
     current_user: User = Depends(get_current_user),
 ):
-    entry = _get_cache_entry(request, session_id)
+    entry = _get_cache_entry(request, session_id, current_user.id)
     jpeg_bytes = generate_preview(entry["image_array"])
     return StreamingResponse(io.BytesIO(jpeg_bytes), media_type="image/jpeg")
 
@@ -166,7 +143,7 @@ async def calibrate(
     request: Request,
     current_user: User = Depends(get_current_user),
 ):
-    entry = _get_cache_entry(request, session_id)
+    entry = _get_cache_entry(request, session_id, current_user.id)
 
     analyzer = FilmAnalyzer()
     analyzer.image_array = entry["image_array"]
@@ -200,7 +177,7 @@ async def dose_preview(
     request: Request,
     current_user: User = Depends(get_current_user),
 ):
-    entry = _get_cache_entry(request, session_id)
+    entry = _get_cache_entry(request, session_id, current_user.id)
     if entry["dose_map"] is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -222,7 +199,7 @@ async def dose_data(
     current_user: User = Depends(get_current_user),
 ):
     """Return the dose map as raw Float32 binary data with metadata in headers."""
-    entry = _get_cache_entry(request, session_id)
+    entry = _get_cache_entry(request, session_id, current_user.id)
     if entry["dose_map"] is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -268,7 +245,7 @@ async def compute_roi(
     request: Request,
     current_user: User = Depends(get_current_user),
 ):
-    entry = _get_cache_entry(request, session_id)
+    entry = _get_cache_entry(request, session_id, current_user.id)
     if entry["dose_map"] is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -349,7 +326,7 @@ async def save_analysis(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    entry = _get_cache_entry(request, session_id)
+    entry = _get_cache_entry(request, session_id, current_user.id)
 
     session_record = AnalysisSession(
         user_id=current_user.id,

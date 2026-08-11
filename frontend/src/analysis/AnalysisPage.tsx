@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import client from "../api/client";
+import { setSharedSession } from "../api/imageSession";
 import CalibrationPanel, { type Profile } from "./CalibrationPanel";
 import ROIControls, { type ROIType } from "./ROIControls";
 import StatsPanel, { type ROIStats } from "./StatsPanel";
@@ -156,6 +157,16 @@ export default function AnalysisPage({ visible = true }: { visible?: boolean }) 
       );
       const blobUrl = URL.createObjectURL(previewRes.data);
       setPreviewUrl(blobUrl);
+
+      // Offer this image to the Image tab without coupling the two pages.
+      setSharedSession({
+        sessionId: data.session_id,
+        filename: file.name,
+        width: data.width,
+        height: data.height,
+        previewUrl: blobUrl,
+        source: "analysis",
+      });
     } catch (err: any) {
       setUploadError(
         err.response?.data?.detail || "Upload failed. Please try again."

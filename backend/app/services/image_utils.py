@@ -41,6 +41,27 @@ def load_image(filepath):
     return image_array, dpi, width, height, channels
 
 
+def _to_uint8(image_array):
+    """
+    Return *image_array* as ``uint8``, min/max stretching if it is not
+    already 8-bit. ``uint8`` input is returned unchanged.
+    """
+    arr = np.asarray(image_array)
+    if arr.dtype == np.uint8:
+        return arr
+
+    a = arr.astype(np.float64)
+    finite = np.isfinite(a)
+    if not finite.any():
+        return np.zeros(a.shape, dtype=np.uint8)
+
+    lo = float(a[finite].min())
+    hi = float(a[finite].max())
+    scale = 255.0 / (hi - lo) if hi > lo else 0.0
+    stretched = (np.nan_to_num(a, nan=lo, posinf=hi, neginf=lo) - lo) * scale
+    return np.clip(stretched, 0, 255).astype(np.uint8)
+
+
 def generate_preview(image_array, max_width=2000):
     """
     Create a JPEG preview of the given image, down-scaled if wider than
@@ -53,12 +74,16 @@ def generate_preview(image_array, max_width=2000):
     max_width : int
         Maximum width in pixels for the preview.
 
+    Non-``uint8`` input (16-bit scans, float arrays) is min/max stretched to
+    8-bit first: ``Image.fromarray`` maps ``uint16`` to mode ``I;16``, which
+    cannot be converted to RGB for JPEG output.
+
     Returns
     -------
     bytes
         JPEG-encoded image bytes.
     """
-    img = Image.fromarray(image_array)
+    img = Image.fromarray(_to_uint8(image_array))
 
     if img.width > max_width:
         ratio = max_width / img.width

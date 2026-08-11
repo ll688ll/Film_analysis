@@ -10,7 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import settings
 from app.database import Base, engine
-from app.routers import analysis, auth_router, profiles, wizard
+from app.routers import analysis, auth_router, imaging, profiles, wizard
 
 
 async def _cache_cleanup_task(app: FastAPI) -> None:
@@ -77,7 +77,13 @@ app.add_middleware(
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["X-Width", "X-Height", "X-Dose-Min", "X-Dose-Max", "X-Cmap-Min", "X-Cmap-Max"],
+    expose_headers=[
+        "X-Width", "X-Height",
+        "X-Dose-Min", "X-Dose-Max", "X-Cmap-Min", "X-Cmap-Max",
+        # Intensity bin-code plane (app.routers.imaging)
+        "X-Int-Bins", "X-Int-Min", "X-Int-Max", "X-Int-Source",
+        "X-Int-Format", "X-Int-Downsample", "X-Int-Nodata", "X-Int-Nan-Count",
+    ],
 )
 
 # ---------------------------------------------------------------------------
@@ -86,6 +92,7 @@ app.add_middleware(
 app.include_router(auth_router.router, prefix="/api")
 app.include_router(profiles.router, prefix="/api")
 app.include_router(analysis.router, prefix="/api")
+app.include_router(imaging.router, prefix="/api")
 app.include_router(wizard.router, prefix="/api")
 
 

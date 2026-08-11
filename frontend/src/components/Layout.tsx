@@ -29,7 +29,10 @@ export default function Layout({ children }: LayoutProps) {
               </h1>
               <nav className="flex items-center space-x-1">
                 <NavLink to="/" end className={linkClass}>
-                  Analysis
+                  Film Dose
+                </NavLink>
+                <NavLink to="/image" className={linkClass}>
+                  Image
                 </NavLink>
                 <NavLink to="/wizard" className={linkClass}>
                   Wizard

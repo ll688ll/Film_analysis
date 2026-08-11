@@ -72,6 +72,43 @@ class TestGeneratePreview:
         assert isinstance(jpeg_bytes, bytes)
         assert jpeg_bytes[:2] == b"\xff\xd8"
 
+    def test_handles_uint16(self):
+        """16-bit input is stretched to 8-bit rather than raising."""
+        arr = np.linspace(0, 65535, 100 * 100, dtype=np.uint16).reshape(100, 100)
+        jpeg_bytes = generate_preview(arr)
+        assert jpeg_bytes[:2] == b"\xff\xd8"
+
+    def test_handles_uint16_rgb(self):
+        arr = np.random.randint(0, 65535, (60, 80, 3), dtype=np.uint16)
+        jpeg_bytes = generate_preview(arr)
+        assert jpeg_bytes[:2] == b"\xff\xd8"
+
+    def test_uint16_is_stretched_to_full_range(self):
+        """A narrow 16-bit range should span 0-255 after conversion."""
+        from app.services.image_utils import _to_uint8
+
+        arr = np.array([[1000, 1100], [1200, 1300]], dtype=np.uint16)
+        out = _to_uint8(arr)
+        assert out.dtype == np.uint8
+        assert out.min() == 0
+        assert out.max() == 255
+
+    def test_uint8_passes_through_unchanged(self):
+        """The 8-bit path must stay byte-identical."""
+        from app.services.image_utils import _to_uint8
+
+        arr = np.random.randint(0, 255, (20, 20, 3), dtype=np.uint8)
+        assert _to_uint8(arr) is arr
+
+    def test_handles_constant_and_nan(self):
+        from app.services.image_utils import _to_uint8
+
+        const = np.full((10, 10), 500, dtype=np.uint16)
+        assert _to_uint8(const).max() == 0  # hi == lo -> scale 0
+
+        with_nan = np.full((10, 10), np.nan, dtype=np.float32)
+        assert _to_uint8(with_nan).max() == 0  # no finite values
+
 
 # ---------------------------------------------------------------------------
 # image_utils.generate_dose_map_preview

@@ -2,20 +2,16 @@
 
 from __future__ import annotations
 
-import uuid
-from datetime import datetime, timezone
-from pathlib import Path
-
 from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, status
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import settings
 from app.database import get_db
 from app.dependencies import get_current_user
 from app.models import CalibrationPoint, CalibrationProfile, ChannelParams, User
 from app.services.calibration import extract_color_percentages, fit_calibration_curves
 from app.services.image_utils import load_image
+from app.services.session_cache import get_cache_entry, put_cache_entry, save_upload
 
 router = APIRouter(prefix="/wizard", tags=["wizard"])
 
@@ -83,38 +79,20 @@ async def upload_wizard_image(
     request: Request,
     current_user: User = Depends(get_current_user),
 ):
-    suffix = Path(file.filename or "").suffix.lower()
-    if suffix not in ALLOWED_EXTENSIONS:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Unsupported file type '{suffix}'. Allowed: {', '.join(ALLOWED_EXTENSIONS)}",
-        )
-
-    contents = await file.read()
-    if len(contents) > settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024:
-        raise HTTPException(
-            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
-            detail=f"File exceeds {settings.MAX_UPLOAD_SIZE_MB} MB limit",
-        )
-
-    user_dir = Path(settings.UPLOAD_DIR) / str(current_user.id) / "wizard"
-    user_dir.mkdir(parents=True, exist_ok=True)
-
-    wizard_session_id = str(uuid.uuid4())
-    save_path = user_dir / f"{wizard_session_id}{suffix}"
-    save_path.write_bytes(contents)
+    wizard_session_id, save_path = await save_upload(
+        file, current_user.id, ALLOWED_EXTENSIONS, subdir="wizard"
+    )
 
     image_array, dpi, _w, _h, _ch = load_image(str(save_path))
 
-    cache: dict = request.app.state.image_cache
-    cache[wizard_session_id] = {
-        "image_array": image_array,
-        "dose_map": None,
-        "dpi": dpi,
-        "last_accessed": datetime.now(timezone.utc),
-        "file_path": str(save_path),
-        "user_id": current_user.id,
-    }
+    put_cache_entry(
+        request,
+        wizard_session_id,
+        image_array=image_array,
+        dpi=dpi,
+        file_path=str(save_path),
+        user_id=current_user.id,
+    )
 
     return {
         "wizard_session_id": wizard_session_id,
@@ -128,14 +106,12 @@ async def extract_point(
     request: Request,
     current_user: User = Depends(get_current_user),
 ):
-    cache: dict = request.app.state.image_cache
-    entry = cache.get(body.wizard_session_id)
-    if entry is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Wizard session not found or expired",
-        )
-    entry["last_accessed"] = datetime.now(timezone.utc)
+    entry = get_cache_entry(
+        request,
+        body.wizard_session_id,
+        current_user.id,
+        detail="Wizard session not found or expired",
+    )
 
     image_array = entry["image_array"]
 

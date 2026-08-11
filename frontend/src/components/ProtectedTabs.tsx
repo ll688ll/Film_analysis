@@ -2,11 +2,12 @@ import { Navigate, useLocation } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
 import Layout from "./Layout";
 import AnalysisPage from "../analysis/AnalysisPage";
+import ImageAnalysisPage from "../imaging/ImageAnalysisPage";
 import WizardPage from "../wizard/WizardPage";
 import HistoryPage from "../history/HistoryPage";
 
 /**
- * Renders all three main pages simultaneously inside a single Layout,
+ * Renders all main pages simultaneously inside a single Layout,
  * showing/hiding them based on the current route. This keeps components
  * mounted so React state is preserved across tab switches.
  */
@@ -33,6 +34,9 @@ export default function ProtectedTabs() {
       {/* All pages rendered simultaneously; CSS controls visibility */}
       <div className={`flex-1 flex flex-col overflow-hidden ${path === "/" ? "" : "hidden"}`}>
         <AnalysisPage visible={path === "/"} />
+      </div>
+      <div className={`flex-1 flex flex-col overflow-hidden ${path === "/image" ? "" : "hidden"}`}>
+        <ImageAnalysisPage visible={path === "/image"} />
       </div>
       <div className={`flex-1 flex flex-col overflow-hidden ${path === "/wizard" ? "" : "hidden"}`}>
         <WizardPage />

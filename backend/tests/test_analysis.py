@@ -94,6 +94,39 @@ async def test_preview_missing_session(auth_client: AsyncClient):
     assert resp.status_code == 404
 
 
+async def test_cross_user_session_is_404(
+    auth_client: AsyncClient, client: AsyncClient, test_film_path: str
+):
+    """A session uploaded by one user must be invisible to another."""
+    upload_data = await _upload_film(auth_client, test_film_path)
+    session_id = upload_data["session_id"]
+
+    resp = await client.post(
+        "/api/auth/register",
+        json={
+            "username": "otheruser",
+            "email": "otheruser@example.com",
+            "password": "otherpass123",
+        },
+    )
+    assert resp.status_code == 201
+    other_token = resp.json()["access_token"]
+    other_headers = {"Authorization": f"Bearer {other_token}"}
+
+    for path in ("preview", "dose-data"):
+        resp = await client.get(
+            f"/api/analysis/{session_id}/{path}", headers=other_headers
+        )
+        assert resp.status_code == 404, f"{path} leaked to another user"
+
+    resp = await client.post(
+        f"/api/analysis/{session_id}/roi",
+        json={"x": 0, "y": 0, "w": 10, "h": 10},
+        headers=other_headers,
+    )
+    assert resp.status_code == 404
+
+
 # ---------------------------------------------------------------------------
 # Calibrate
 # ---------------------------------------------------------------------------
