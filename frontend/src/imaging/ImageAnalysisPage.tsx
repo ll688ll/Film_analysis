@@ -12,6 +12,12 @@ import IntensityHistogram, { type HistogramMode } from "./IntensityHistogram";
 import IntensityPalette from "./IntensityPalette";
 import LevelControls from "./LevelControls";
 import LevelTable from "./LevelTable";
+import WindowLevelPanel from "./WindowLevelPanel";
+import {
+  fullRangeWL,
+  type BackdropMode,
+  type WindowLevel,
+} from "./windowLevel";
 import {
   baseName,
   copyToClipboard,
@@ -81,6 +87,9 @@ export default function ImageAnalysisPage({ visible = true }: ImageAnalysisPageP
   const [isolate, setIsolate] = useState<number | null>(null);
   const [overlayOpacity, setOverlayOpacity] = useState(1);
   const [histMode, setHistMode] = useState<HistogramMode>("levels");
+  // Display-only transfer function; never feeds back into the analysis.
+  const [wl, setWl] = useState<WindowLevel>({ level: 128, window: 256, invert: false });
+  const [backdrop, setBackdrop] = useState<BackdropMode>("original");
 
   // --- Derived / async ---------------------------------------------------
   const [exactStats, setExactStats] = useState<Record<number, LevelStat["exact"]> | null>(null);
@@ -121,6 +130,8 @@ export default function ImageAnalysisPage({ visible = true }: ImageAnalysisPageP
     isolate,
     overlayOpacity,
     baseImage,
+    windowLevel: wl,
+    backdrop,
   });
 
   useEffect(() => subscribeSharedSession(setShared), []);
@@ -314,6 +325,16 @@ export default function ImageAnalysisPage({ visible = true }: ImageAnalysisPageP
     // resolved histogram avoids a second pass for an identical result.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [histKey, levelCount, method]);
+
+  // Reset the display ramp whenever the underlying value range changes
+  // (new image, or a different source channel).
+  const wlKey = hist ? `${hist.source}:${hist.data_min}:${hist.data_max}` : null;
+  useEffect(() => {
+    if (!hist) return;
+    setWl(fullRangeWL(hist.data_min, hist.data_max));
+    setBackdrop("original");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wlKey]);
 
   // Recolour without touching boundaries when the preset changes.
   useEffect(() => {
@@ -687,6 +708,17 @@ export default function ImageAnalysisPage({ visible = true }: ImageAnalysisPageP
           onLevelColorChange={handleLevelColorChange}
           onIsolate={setIsolate}
           disabled={busy || levels.length === 0}
+        />
+
+        <WindowLevelPanel
+          wl={wl}
+          onChange={setWl}
+          backdrop={backdrop}
+          onBackdropChange={setBackdrop}
+          hist={hist}
+          overlayOpacity={overlayOpacity}
+          onOverlayOpacityChange={setOverlayOpacity}
+          disabled={busy}
         />
 
         <LevelTable

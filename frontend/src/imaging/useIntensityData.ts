@@ -15,6 +15,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import client from "../api/client";
 import { applyLevelLUT, buildLevelLUT, compositeLevelMap } from "./levelColors";
 import { buildPrefix, type Prefix } from "./intensityStats";
+import {
+  buildBackdropLUT,
+  type BackdropMode,
+  type WindowLevel,
+} from "./windowLevel";
 import type { AnalyzeResponse, IntensitySource, Level, ROIRect } from "./types";
 
 /** Upper bound on repaint latency when animation frames are not running. */
@@ -37,6 +42,9 @@ export interface UseIntensityDataOptions {
   isolate: number | null;
   overlayOpacity: number;
   baseImage: HTMLImageElement | null;
+  /** Display-only transfer function for the backdrop. Never affects stats. */
+  windowLevel: WindowLevel;
+  backdrop: BackdropMode;
 }
 
 interface PlaneData {
@@ -62,6 +70,8 @@ export function useIntensityData({
   isolate,
   overlayOpacity,
   baseImage,
+  windowLevel,
+  backdrop,
 }: UseIntensityDataOptions) {
   const [hist, setHist] = useState<AnalyzeResponse | null>(null);
   const [loading, setLoading] = useState(false);
@@ -71,6 +81,7 @@ export function useIntensityData({
   const planeRef = useRef<PlaneData | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const scratchRef = useRef<HTMLCanvasElement | null>(null);
+  const backdropRef = useRef<HTMLCanvasElement | null>(null);
   const pendingRef = useRef<{ raf: number | null; timer: number | null }>({
     raf: null,
     timer: null,
@@ -182,12 +193,33 @@ export function useIntensityData({
       scratchRef.current = scratch;
     }
 
+    // Backdrop: either the original preview, or the analysed source rendered
+    // through the Window/Level ramp. The latter is built from the same bin
+    // codes as the level map, so it is exact in source units.
+    let backdropSource: CanvasImageSource | null = baseImage;
+    if (backdrop === "windowed" && hist) {
+      const h = hist;
+      let bd = backdropRef.current;
+      if (!bd) {
+        bd = document.createElement("canvas");
+        backdropRef.current = bd;
+      }
+      if (bd.width !== plane.width || bd.height !== plane.height) {
+        bd.width = plane.width;
+        bd.height = plane.height;
+      }
+      const bdLUT = buildBackdropLUT(plane.bins, h.value_min, h.bin_width, windowLevel);
+      const bdData = applyLevelLUT(plane.codes, plane.width, plane.height, bdLUT);
+      bd.getContext("2d")!.putImageData(bdData, 0, 0);
+      backdropSource = bd;
+    }
+
     const lut = buildLevelLUT(levels, plane.bins, { isolate });
     const imageData = applyLevelLUT(plane.codes, plane.width, plane.height, lut);
-    compositeLevelMap(canvas, scratch, imageData, baseImage, overlayOpacity);
+    compositeLevelMap(canvas, scratch, imageData, backdropSource, overlayOpacity);
 
     setCanvasVersion((v) => v + 1);
-  }, [levels, isolate, overlayOpacity, baseImage]);
+  }, [levels, isolate, overlayOpacity, baseImage, windowLevel, backdrop, hist]);
 
   // Always call the newest paint from the pending callback, so coalescing
   // several changes still renders the latest state.

@@ -237,9 +237,10 @@ export default function LevelControls({
             type="button"
             disabled={disabled || !windowed}
             onClick={() => onWindowChange(null, null)}
+            title="Clear the window and analyse the full data range"
             className="flex-1 px-2 py-1 text-xs bg-slate-800 border border-slate-600 rounded text-slate-300 hover:bg-slate-600 disabled:opacity-50"
           >
-            Reset
+            Clear
           </button>
         </div>
         {hist && (hist.excluded_low > 0 || hist.excluded_high > 0) && (
