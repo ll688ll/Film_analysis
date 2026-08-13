@@ -8,6 +8,7 @@ import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from app.config import settings
 from app.database import Base, get_db
 from app.main import app
 
@@ -53,6 +54,23 @@ async def _setup_db():
     yield
     async with test_engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
+
+
+# ---------------------------------------------------------------------------
+# File storage
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def upload_dir(tmp_path, monkeypatch):
+    """Redirect uploads to a temporary directory.
+
+    Uploading and saving both write real files; without this the suite would
+    accumulate them in the developer's ``backend/uploads``.
+    """
+    target = tmp_path / "uploads"
+    target.mkdir()
+    monkeypatch.setattr(settings, "UPLOAD_DIR", str(target))
+    return target
 
 
 # ---------------------------------------------------------------------------

@@ -1,6 +1,7 @@
-import { type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { NavLink } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
+import client from "../api/client";
 
 interface LayoutProps {
   children: ReactNode;
@@ -8,6 +9,22 @@ interface LayoutProps {
 
 export default function Layout({ children }: LayoutProps) {
   const { user, logout } = useAuth();
+  const [version, setVersion] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    client
+      .get<{ status: string; version?: string }>("/health")
+      .then((res) => {
+        if (!cancelled) setVersion(res.data.version ?? null);
+      })
+      .catch(() => {
+        /* version badge is cosmetic -- ignore failures */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const linkClass = ({ isActive }: { isActive: boolean }) =>
     `px-3 py-2 rounded-md text-sm font-medium transition-colors ${
@@ -24,9 +41,16 @@ export default function Layout({ children }: LayoutProps) {
           <div className="flex items-center justify-between h-14">
             {/* Left: App title + nav links */}
             <div className="flex items-center space-x-6">
-              <h1 className="text-lg font-bold text-white tracking-tight">
-                Film Analysis
-              </h1>
+              <div className="flex items-baseline space-x-2">
+                <h1 className="text-lg font-bold text-white tracking-tight">
+                  Film Analysis
+                </h1>
+                {version && (
+                  <span className="text-xs text-slate-400 font-mono">
+                    v{version}
+                  </span>
+                )}
+              </div>
               <nav className="flex items-center space-x-1">
                 <NavLink to="/" end className={linkClass}>
                   Film Dose

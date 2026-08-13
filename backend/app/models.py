@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 
 from sqlalchemy import (
+    JSON,
     Boolean,
     DateTime,
     Float,
@@ -37,6 +38,31 @@ class User(Base):
     analysis_sessions: Mapped[list["AnalysisSession"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
+    projects: Mapped[list["Project"]] = relationship(
+        back_populates="user", cascade="all, delete-orphan"
+    )
+
+
+class Project(Base):
+    """A user-defined folder grouping related analyses."""
+
+    __tablename__ = "projects"
+    __table_args__ = (UniqueConstraint("user_id", "name"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    user_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    description: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, onupdate=_utcnow
+    )
+
+    user: Mapped["User"] = relationship(back_populates="projects")
 
 
 class CalibrationProfile(Base):
@@ -119,21 +145,42 @@ class AnalysisSession(Base):
         ForeignKey("calibration_profiles.id", ondelete="SET NULL"),
         nullable=True,
     )
+    project_id: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("projects.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     original_filename: Mapped[str] = mapped_column(String(255), nullable=False)
     stored_filepath: Mapped[str] = mapped_column(String(500), nullable=False)
     dpi: Mapped[float] = mapped_column(Float, default=72.0)
+    image_width: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    image_height: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    image_channels: Mapped[int | None] = mapped_column(Integer, nullable=True)
     channel: Mapped[str] = mapped_column(String(10), nullable=False)
     a: Mapped[float] = mapped_column(Float, nullable=False)
     b: Mapped[float] = mapped_column(Float, nullable=False)
     c: Mapped[float] = mapped_column(Float, nullable=False)
     cmap_min: Mapped[float] = mapped_column(Float, default=0.0)
     cmap_max: Mapped[float] = mapped_column(Float, default=40.0)
+    colormap: Mapped[str] = mapped_column(String(20), default="jet")
+    # Immutable copy of the calibration that produced this analysis. Profiles are
+    # mutable and deletable, so the FK alone cannot preserve provenance.
+    profile_snapshot: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow
+    )
+    updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True, onupdate=_utcnow
     )
     notes: Mapped[str] = mapped_column(Text, default="")
 
     user: Mapped["User"] = relationship(back_populates="analysis_sessions")
+    profile: Mapped["CalibrationProfile | None"] = relationship(
+        "CalibrationProfile", lazy="raise_on_sql"
+    )
+    project: Mapped["Project | None"] = relationship(
+        "Project", lazy="raise_on_sql"
+    )
     roi_measurements: Mapped[list["ROIMeasurement"]] = relationship(
         back_populates="session", cascade="all, delete-orphan"
     )
@@ -156,6 +203,11 @@ class ROIMeasurement(Base):
     rotation_deg: Mapped[float] = mapped_column(Float, default=0.0)
     hole_ratio: Mapped[float] = mapped_column(Float, default=50.0)
     threshold: Mapped[float] = mapped_column(Float, default=0.0)
+    trim_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    trim_percent: Mapped[float] = mapped_column(Float, default=2.0)
+    corner_cut_enabled: Mapped[bool] = mapped_column(Boolean, default=False)
+    corner_cut_mm: Mapped[float] = mapped_column(Float, default=0.0)
+    pixel_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     dose_max: Mapped[float | None] = mapped_column(Float, nullable=True)
     dose_min: Mapped[float | None] = mapped_column(Float, nullable=True)
     dose_mean: Mapped[float | None] = mapped_column(Float, nullable=True)

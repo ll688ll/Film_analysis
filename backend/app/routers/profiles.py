@@ -6,13 +6,13 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.database import get_db
 from app.dependencies import get_current_user
-from app.models import CalibrationProfile, ChannelParams, User
+from app.models import AnalysisSession, CalibrationProfile, ChannelParams, User
 
 router = APIRouter(prefix="/profiles", tags=["profiles"])
 
@@ -189,7 +189,16 @@ async def delete_profile(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    """Delete a profile. Analyses that used it keep their saved snapshot."""
     profile = await _get_user_profile(profile_id, current_user.id, db)
+
+    # Explicit rather than relying on ON DELETE SET NULL: SQLite (used by the
+    # test suite) does not enforce foreign key actions by default.
+    await db.execute(
+        update(AnalysisSession)
+        .where(AnalysisSession.profile_id == profile.id)
+        .values(profile_id=None)
+    )
     await db.delete(profile)
 
 

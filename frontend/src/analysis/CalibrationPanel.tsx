@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import client from "../api/client";
 
 export interface ChannelParams {
@@ -20,7 +20,7 @@ export interface Profile {
 interface CalibrationPanelProps {
   profiles: Profile[];
   onApplyCalibration: (params: {
-    profile_id: number;
+    profile_id: number | null;
     channel: string;
     a: number;
     b: number;
@@ -35,6 +35,16 @@ interface CalibrationPanelProps {
   cmapMax: number;
   onCmapMinChange: (v: number) => void;
   onCmapMaxChange: (v: number) => void;
+  /** Calibration to load when restoring a saved analysis. */
+  restoreCalibration?: {
+    profile_id: number | null;
+    channel: string;
+    a: number;
+    b: number;
+    c: number;
+  } | null;
+  /** Bump to apply `restoreCalibration`; a plain value prop would re-fire on every render. */
+  restoreVersion?: number;
 }
 
 const CHANNELS = ["Red", "Green", "Blue", "Gray"];
@@ -49,12 +59,19 @@ export default function CalibrationPanel({
   cmapMax,
   onCmapMinChange,
   onCmapMaxChange,
+  restoreCalibration = null,
+  restoreVersion = 0,
 }: CalibrationPanelProps) {
   const [selectedProfileId, setSelectedProfileId] = useState<number | "">("");
   const [channel, setChannel] = useState("Red");
   const [a, setA] = useState(0);
   const [b, setB] = useState(0);
   const [c, setC] = useState(0);
+
+  // Guards the auto-fill effect for one run after a restore, so coefficients
+  // saved with the analysis survive even if the live profile has been edited.
+  const skipAutoFillRef = useRef(false);
+  const appliedRestoreRef = useRef(0);
 
   // Edit state
   const [editing, setEditing] = useState(false);
@@ -70,8 +87,32 @@ export default function CalibrationPanel({
       ? profiles.find((p) => p.id === selectedProfileId)
       : undefined;
 
+  // Load a saved analysis's calibration when it is reopened
+  useEffect(() => {
+    if (!restoreCalibration || restoreVersion === appliedRestoreRef.current) {
+      return;
+    }
+    appliedRestoreRef.current = restoreVersion;
+    skipAutoFillRef.current = true;
+
+    // Leave the selector empty if the profile has since been deleted; the
+    // coefficients below still describe the calibration that was used.
+    const stillExists =
+      restoreCalibration.profile_id !== null &&
+      profiles.some((p) => p.id === restoreCalibration.profile_id);
+    setSelectedProfileId(stillExists ? restoreCalibration.profile_id! : "");
+    setChannel(restoreCalibration.channel);
+    setA(restoreCalibration.a);
+    setB(restoreCalibration.b);
+    setC(restoreCalibration.c);
+  }, [restoreCalibration, restoreVersion, profiles]);
+
   // Auto-fill a/b/c when profile or channel changes
   useEffect(() => {
+    if (skipAutoFillRef.current) {
+      skipAutoFillRef.current = false;
+      return;
+    }
     if (!selectedProfile) return;
     const params = selectedProfile.channel_params?.find(
       (cp) => cp.channel.toLowerCase() === channel.toLowerCase()
@@ -89,10 +130,14 @@ export default function CalibrationPanel({
     setConfirmDelete(false);
   }, [selectedProfileId]);
 
+  // Applying without a profile is allowed so a reopened analysis whose profile
+  // was deleted can still be recalibrated from its saved coefficients.
+  const canApply = selectedProfileId !== "" || a !== 0 || b !== 0 || c !== 0;
+
   const handleApply = () => {
-    if (selectedProfileId === "") return;
+    if (!canApply) return;
     onApplyCalibration({
-      profile_id: selectedProfileId,
+      profile_id: selectedProfileId === "" ? null : selectedProfileId,
       channel,
       a,
       b,
@@ -344,9 +389,9 @@ export default function CalibrationPanel({
           {/* Apply button */}
           <button
             onClick={handleApply}
-            disabled={disabled || selectedProfileId === "" || loading}
+            disabled={disabled || !canApply || loading}
             className={`w-full px-3 py-2 text-sm font-medium rounded-lg transition-colors flex items-center justify-center gap-2 ${
-              disabled || selectedProfileId === "" || loading
+              disabled || !canApply || loading
                 ? "bg-slate-600 text-slate-400 cursor-not-allowed"
                 : "bg-sky-600 hover:bg-sky-500 text-white"
             }`}

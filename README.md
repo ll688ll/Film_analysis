@@ -11,8 +11,10 @@ Originally built as a desktop tkinter application (`main.py`), now extended with
 - **Film analysis** — Upload irradiated film scans, apply a calibration profile to generate dose maps, interactively explore dose values with cursor readout
 - **ROI tools** — Rectangle, Circle, and Ring ROI shapes with drag, resize, and rotation; computes dose statistics (mean, min, max, std, CV, DUR, flatness) with physical dimensions (mm)
 - **Interactive dose map** — Client-side Canvas rendering with selectable colormaps (jet, viridis, hot), adjustable dose range, and real-time cursor dose readout
-- **History** — Browse and review saved analysis sessions
-- **CSV export** — Export ROI measurement data
+- **Analysis history** — Saved analyses keep the original film scan, an immutable snapshot of the calibration profile that produced them, the ROI geometry, and the computed statistics
+- **Project folders** — Group saved analyses into per-user projects; move them between projects or leave them unfiled
+- **Resume a study** — Reopen a saved analysis on the Film Analysis page with its calibration, ROI, and display settings restored, then update it in place or fork it with "Save as New"
+- **CSV export** — Export ROI measurement data, including trim and corner-cut settings
 - **Legacy import** — Import calibration profiles from the desktop app's `calibration_config.json`
 
 ## Calibration Model
@@ -49,7 +51,8 @@ Where `Color% = pixel_value / 255.0` (0–1 range). Curves are fitted independen
 - Axios with JWT interceptor
 
 **Database** (PostgreSQL 16):
-- Users, calibration profiles, channel parameters, calibration points, analysis sessions, ROI measurements
+- Users, projects, calibration profiles, channel parameters, calibration points, analysis sessions, ROI measurements
+- Tables are created at startup by `Base.metadata.create_all`. Because that cannot alter existing tables, new columns are added by the idempotent `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` statements in `backend/app/migrations.py`, which run immediately afterwards. To add a column later, add it to the model and append one statement there.
 
 ## Project Structure
 
@@ -65,28 +68,36 @@ Film_analysis/
 │   ├── requirements.txt
 │   └── app/
 │       ├── main.py            # FastAPI app entry point, CORS, lifespan
-│       ├── config.py          # Settings (env vars)
+│       ├── config.py          # Settings (env vars) + APP_VERSION
 │       ├── database.py        # Async SQLAlchemy engine + session
-│       ├── models.py          # ORM models (User, CalibrationProfile, etc.)
-│       ├── schemas.py         # Pydantic request/response schemas
+│       ├── migrations.py      # Idempotent startup schema patches
+│       ├── models.py          # ORM models (User, Project, CalibrationProfile, etc.)
+│       ├── schemas.py         # Pydantic schemas for auth
 │       ├── auth.py            # Password hashing + JWT token creation
 │       ├── dependencies.py    # get_current_user dependency
 │       ├── routers/
 │       │   ├── auth_router.py # POST /register, /login, GET /me
 │       │   ├── profiles.py    # CRUD for calibration profiles
-│       │   ├── analysis.py    # Upload, calibrate, dose map, ROI, save, export
+│       │   ├── projects.py    # CRUD for analysis project folders
+│       │   ├── analysis.py    # Upload, calibrate, dose map, ROI, save, saved analyses
 │       │   └── wizard.py      # Calibration wizard workflow
 │       └── services/
 │           ├── film_analyzer.py   # Dose calculation, ROI mask, statistics
 │           ├── calibration.py     # Color extraction, curve fitting
+│           ├── analysis_files.py  # Film file ownership for saved analyses
 │           └── image_utils.py     # Image loading, preview generation
 │
 ├── backend/tests/
 │   ├── conftest.py            # Async test fixtures (SQLite test DB)
-│   ├── test_auth.py           # Authentication tests (10 tests)
-│   ├── test_services.py       # Service layer tests (24 tests)
-│   ├── test_analysis.py       # Analysis endpoint tests (13 tests)
-│   └── test_wizard.py         # Wizard endpoint tests (8 tests)
+│   ├── test_auth.py           # Authentication tests
+│   ├── test_services.py       # Service layer tests
+│   ├── test_analysis.py       # Analysis endpoint tests
+│   ├── test_saved_analysis.py # Save, reopen, delete, project membership
+│   ├── test_projects.py       # Project CRUD and isolation
+│   └── test_wizard.py         # Wizard endpoint tests
+│
+├── docs/
+│   └── analysis-history-design.md  # Design of the saved-analysis feature
 │
 ├── frontend/
 │   ├── Dockerfile
@@ -216,21 +227,46 @@ All endpoints are prefixed with `/api`. Protected endpoints require a `Bearer` t
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
+Working-session endpoints take the in-memory cache UUID returned by `/upload`:
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
 | POST | `/api/analysis/upload` | Upload film scan for analysis |
 | GET | `/api/analysis/{id}/preview` | Get film image preview (JPEG) |
 | POST | `/api/analysis/{id}/calibrate` | Apply calibration, generate dose map |
 | GET | `/api/analysis/{id}/dose-preview` | Get dose map as PNG image |
 | GET | `/api/analysis/{id}/dose-data` | Get dose map as binary Float32 array |
 | POST | `/api/analysis/{id}/roi` | Compute ROI statistics |
-| POST | `/api/analysis/{id}/save` | Save analysis session |
-| GET | `/api/analysis/history` | List saved analysis sessions |
-| GET | `/api/analysis/{id}/export` | Export ROI measurements as CSV |
+| POST | `/api/analysis/{id}/save` | Save the analysis, or overwrite an existing one |
+
+### Saved Analyses
+
+These take the database id of a saved analysis, not the session UUID:
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/analysis/history` | List saved analyses |
+| GET | `/api/analysis/saved/{id}` | Full detail, including calibration snapshot and ROI |
+| POST | `/api/analysis/saved/{id}/open` | Reload the film into a fresh session to continue the study |
+| PATCH | `/api/analysis/saved/{id}` | Update notes or project membership |
+| DELETE | `/api/analysis/saved/{id}` | Delete the analysis and the film file it owns |
+| GET | `/api/analysis/saved/{id}/file` | Download the original film scan |
+| GET | `/api/analysis/saved/{id}/export` | Export ROI measurements as CSV |
+
+### Projects
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/api/projects` | List projects with their analysis counts |
+| POST | `/api/projects` | Create a project |
+| PUT | `/api/projects/{id}` | Rename or re-describe a project |
+| DELETE | `/api/projects/{id}` | Delete a project; its analyses become unfiled |
 
 ### Health Check
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/api/health` | Service health check |
+| GET | `/api/health` | Service health check; returns the application version |
 
 ## Configuration
 

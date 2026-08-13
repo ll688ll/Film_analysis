@@ -1,6 +1,11 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import client from "../api/client";
 import { setSharedSession } from "../api/imageSession";
+import {
+  subscribePendingRestore,
+  takePendingRestore,
+  type RestorePayload,
+} from "../api/analysisTransfer";
 import CalibrationPanel, { type Profile } from "./CalibrationPanel";
 import ROIControls, { type ROIType } from "./ROIControls";
 import StatsPanel, { type ROIStats } from "./StatsPanel";
@@ -32,6 +37,28 @@ interface ROIData {
   rotation: number;
 }
 
+interface ProjectSummary {
+  id: number;
+  name: string;
+}
+
+const COLORMAPS: ColormapName[] = ["jet", "viridis", "hot"];
+
+/** Saved colormaps are plain strings in the database, so validate on the way in. */
+function toColormap(value: string | null | undefined): ColormapName {
+  return COLORMAPS.includes(value as ColormapName)
+    ? (value as ColormapName)
+    : "jet";
+}
+
+interface AppliedCalibration {
+  profile_id: number | null;
+  channel: string;
+  a: number;
+  b: number;
+  c: number;
+}
+
 export default function AnalysisPage({ visible = true }: { visible?: boolean }) {
   // Session state
   const [sessionId, setSessionId] = useState<string | null>(null);
@@ -43,14 +70,24 @@ export default function AnalysisPage({ visible = true }: { visible?: boolean }) 
   // Profiles
   const [profiles, setProfiles] = useState<Profile[]>([]);
 
+  // Projects (folders a saved analysis can belong to)
+  const [projects, setProjects] = useState<ProjectSummary[]>([]);
+  const [projectId, setProjectId] = useState<number | null>(null);
+
+  // Set when this session came from history, so saving can update that record
+  const [savedAnalysisId, setSavedAnalysisId] = useState<number | null>(null);
+
   // Last-applied calibration params (needed for save)
-  const [appliedCalibration, setAppliedCalibration] = useState<{
-    profile_id: number;
-    channel: string;
-    a: number;
-    b: number;
-    c: number;
-  } | null>(null);
+  const [appliedCalibration, setAppliedCalibration] =
+    useState<AppliedCalibration | null>(null);
+
+  // Calibration and ROI handed to the child panels when restoring
+  const [restoreCalibration, setRestoreCalibration] =
+    useState<AppliedCalibration | null>(null);
+  const [restoreVersion, setRestoreVersion] = useState(0);
+  const [initialRoi, setInitialRoi] = useState<ROIData | null>(null);
+  const [initialRoiVersion, setInitialRoiVersion] = useState(0);
+  const [restoreError, setRestoreError] = useState<string | null>(null);
 
   // ROI state
   const [roiType, setROIType] = useState<ROIType>("Rectangle");
@@ -74,6 +111,7 @@ export default function AnalysisPage({ visible = true }: { visible?: boolean }) 
   const [notes, setNotes] = useState("");
   const [saving, setSaving] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   // Colormap and dose range
   const [colormap, setColormap] = useState<ColormapName>("jet");
@@ -89,6 +127,23 @@ export default function AnalysisPage({ visible = true }: { visible?: boolean }) 
   // File input ref
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // Blob URLs must be revoked by hand or the image bytes leak for the session
+  const previewUrlRef = useRef<string | null>(null);
+  const setPreview = useCallback((url: string | null) => {
+    if (previewUrlRef.current && previewUrlRef.current !== url) {
+      URL.revokeObjectURL(previewUrlRef.current);
+    }
+    previewUrlRef.current = url;
+    setPreviewUrl(url);
+  }, []);
+
+  useEffect(
+    () => () => {
+      if (previewUrlRef.current) URL.revokeObjectURL(previewUrlRef.current);
+    },
+    []
+  );
+
   // Fetch profiles
   const fetchProfiles = useCallback(() => {
     client
@@ -97,11 +152,19 @@ export default function AnalysisPage({ visible = true }: { visible?: boolean }) 
       .catch(() => {});
   }, []);
 
-  // Re-fetch profiles when tab becomes visible
+  const fetchProjects = useCallback(() => {
+    client
+      .get<ProjectSummary[]>("/projects")
+      .then((res) => setProjects(res.data))
+      .catch(() => {});
+  }, []);
+
+  // Re-fetch profiles and projects when tab becomes visible
   useEffect(() => {
     if (!visible) return;
     fetchProfiles();
-  }, [visible, fetchProfiles]);
+    fetchProjects();
+  }, [visible, fetchProfiles, fetchProjects]);
 
   // Interactive dose map hook — cmapMin/cmapMax drive client-side re-coloring
   const { doseMapData, getDoseAt, canvasVersion } = useDoseMap({
@@ -132,6 +195,10 @@ export default function AnalysisPage({ visible = true }: { visible?: boolean }) 
     setIsCalibrated(false);
     setStats(null);
     setCurrentROI(null);
+    // A new film starts a new study; the next save must not overwrite the
+    // analysis that happened to be open before.
+    setSavedAnalysisId(null);
+    setRestoreError(null);
 
     try {
       const formData = new FormData();
@@ -156,7 +223,7 @@ export default function AnalysisPage({ visible = true }: { visible?: boolean }) 
         { responseType: "blob" }
       );
       const blobUrl = URL.createObjectURL(previewRes.data);
-      setPreviewUrl(blobUrl);
+      setPreview(blobUrl);
 
       // Offer this image to the Image tab without coupling the two pages.
       setSharedSession({
@@ -174,7 +241,7 @@ export default function AnalysisPage({ visible = true }: { visible?: boolean }) 
     } finally {
       setUploading(false);
     }
-  }, []);
+  }, [setPreview]);
 
   // Drop handler
   const handleDrop = useCallback(
@@ -189,7 +256,7 @@ export default function AnalysisPage({ visible = true }: { visible?: boolean }) 
   // Apply calibration
   const handleApplyCalibration = useCallback(
     async (params: {
-      profile_id: number;
+      profile_id: number | null;
       channel: string;
       a: number;
       b: number;
@@ -222,6 +289,110 @@ export default function AnalysisPage({ visible = true }: { visible?: boolean }) 
     },
     [sessionId]
   );
+
+  // Reopen a saved analysis: the server has already rehydrated the film into a
+  // fresh session, so this rebuilds the page state around it.
+  const restoreFromSaved = useCallback(
+    async (payload: RestorePayload) => {
+      setRestoreError(null);
+      setUploadError(null);
+      setStats(null);
+      setCurrentROI(null);
+      setIsCalibrated(false);
+
+      setSessionId(payload.session_id);
+      setSavedAnalysisId(payload.id);
+      setProjectId(payload.project_id);
+      setNotes(payload.notes || "");
+      setImageInfo({
+        width: payload.width,
+        height: payload.height,
+        dpi: payload.dpi,
+        channels: payload.channels,
+      });
+
+      setColormap(toColormap(payload.colormap));
+      setCmapMin(payload.cmap_min);
+      setCmapMax(payload.cmap_max);
+
+      const saved = payload.roi;
+      if (saved) {
+        setROIType(saved.roi_type as ROIType);
+        setRotation(saved.rotation_deg);
+        setHoleRatio(saved.hole_ratio);
+        setThreshold(saved.threshold);
+        setTrimEnabled(saved.trim_enabled);
+        setTrimPercent(saved.trim_percent);
+        setCornerCutEnabled(saved.corner_cut_enabled);
+        if (saved.corner_cut_mm > 0) setCornerCutMm(saved.corner_cut_mm);
+      }
+
+      const calibration: AppliedCalibration = {
+        profile_id: payload.profile_id,
+        channel: payload.channel,
+        a: payload.a,
+        b: payload.b,
+        c: payload.c,
+      };
+      setRestoreCalibration(calibration);
+      setRestoreVersion((v) => v + 1);
+
+      try {
+        const previewRes = await client.get(
+          `/analysis/${payload.session_id}/preview`,
+          { responseType: "blob" }
+        );
+        setPreview(URL.createObjectURL(previewRes.data));
+      } catch {
+        setRestoreError("Could not load the film preview.");
+      }
+
+      setCalibrating(true);
+      try {
+        await client.post(`/analysis/${payload.session_id}/calibrate`, {
+          ...calibration,
+          cmap_min: payload.cmap_min,
+          cmap_max: payload.cmap_max,
+        });
+        setIsCalibrated(true);
+        setCalibrationVersion((v) => v + 1);
+        setAppliedCalibration(calibration);
+
+        // Only now is the dose map on its way; the canvas clears its ROI while
+        // the preview loads, so restoring it any earlier would be discarded.
+        if (saved) {
+          const roi: ROIData = {
+            x: saved.x,
+            y: saved.y,
+            w: saved.w,
+            h: saved.h,
+            rotation: saved.rotation_deg,
+          };
+          setCurrentROI(roi);
+          setInitialRoi(roi);
+          setInitialRoiVersion((v) => v + 1);
+        }
+      } catch (err: any) {
+        setRestoreError(
+          err.response?.data?.detail ||
+            "Could not re-apply the saved calibration."
+        );
+      } finally {
+        setCalibrating(false);
+      }
+    },
+    [setPreview]
+  );
+
+  // Pick up an analysis reopened from the History tab
+  useEffect(() => {
+    const pending = takePendingRestore();
+    if (pending) restoreFromSaved(pending);
+    return subscribePendingRestore((payload) => {
+      takePendingRestore();
+      restoreFromSaved(payload);
+    });
+  }, [restoreFromSaved]);
 
   // Calculate ROI stats
   const calculateStats = useCallback(
@@ -293,28 +464,93 @@ export default function AnalysisPage({ visible = true }: { visible?: boolean }) 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [trimEnabled, trimPercent, cornerCutEnabled, cornerCutMm]);
 
-  // Save session
-  const handleSave = useCallback(async () => {
-    if (!sessionId || !appliedCalibration) return;
-    setSaving(true);
-    setSaveSuccess(false);
-    try {
-      await client.post(`/analysis/${sessionId}/save`, {
-        profile_id: appliedCalibration.profile_id,
-        channel: appliedCalibration.channel,
-        a: appliedCalibration.a,
-        b: appliedCalibration.b,
-        c: appliedCalibration.c,
-        notes,
-      });
-      setSaveSuccess(true);
-      setTimeout(() => setSaveSuccess(false), 3000);
-    } catch {
-      alert("Failed to save session.");
-    } finally {
-      setSaving(false);
-    }
-  }, [sessionId, appliedCalibration, notes]);
+  // Recompute stats for a restored ROI rather than trusting the stored numbers,
+  // so what is shown always matches the dose map currently on screen.
+  useEffect(() => {
+    if (!initialRoiVersion || !isCalibrated || !initialRoi) return;
+    calculateStats(initialRoi);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialRoiVersion, isCalibrated]);
+
+  // Save the analysis: the whole study, not just the calibration numbers.
+  // `overwrite` updates the record this session was reopened from; otherwise a
+  // new record is created (used for "Save as New" when comparing variations).
+  const handleSave = useCallback(
+    async (overwrite: boolean) => {
+      if (!sessionId || !appliedCalibration) return;
+      setSaving(true);
+      setSaveSuccess(false);
+      setSaveError(null);
+      try {
+        const res = await client.post<{ id: number }>(
+          `/analysis/${sessionId}/save`,
+          {
+            profile_id: appliedCalibration.profile_id,
+            channel: appliedCalibration.channel,
+            a: appliedCalibration.a,
+            b: appliedCalibration.b,
+            c: appliedCalibration.c,
+            cmap_min: cmapMin,
+            cmap_max: cmapMax,
+            colormap,
+            notes,
+            project_id: projectId,
+            analysis_id: overwrite ? savedAnalysisId : null,
+            roi: currentROI
+              ? {
+                  roi_type: roiType,
+                  x: currentROI.x,
+                  y: currentROI.y,
+                  w: currentROI.w,
+                  h: currentROI.h,
+                  rotation_deg: currentROI.rotation,
+                  hole_ratio: holeRatio,
+                  threshold,
+                  trim_enabled: trimEnabled,
+                  trim_percent: trimPercent,
+                  corner_cut_enabled:
+                    roiType === "Rectangle" && cornerCutEnabled,
+                  corner_cut_mm: cornerCutMm,
+                }
+              : null,
+            stats: stats ?? null,
+          }
+        );
+        // Further saves target the record just written, so repeated clicks of
+        // "Update Saved" keep editing one analysis instead of piling up copies.
+        setSavedAnalysisId(res.data.id);
+        setSaveSuccess(true);
+        setTimeout(() => setSaveSuccess(false), 3000);
+      } catch (err: any) {
+        setSaveError(
+          err.response?.status === 404
+            ? "This session expired. Re-upload the film or reopen it from History."
+            : err.response?.data?.detail || "Failed to save the analysis."
+        );
+      } finally {
+        setSaving(false);
+      }
+    },
+    [
+      sessionId,
+      appliedCalibration,
+      cmapMin,
+      cmapMax,
+      colormap,
+      notes,
+      projectId,
+      savedAnalysisId,
+      currentROI,
+      roiType,
+      holeRatio,
+      threshold,
+      trimEnabled,
+      trimPercent,
+      cornerCutEnabled,
+      cornerCutMm,
+      stats,
+    ]
+  );
 
   return (
     <div className="flex-1 flex overflow-hidden">
@@ -397,6 +633,10 @@ export default function AnalysisPage({ visible = true }: { visible?: boolean }) 
             <p className="mt-2 text-xs text-red-400">{uploadError}</p>
           )}
 
+          {restoreError && (
+            <p className="mt-2 text-xs text-red-400">{restoreError}</p>
+          )}
+
           {imageInfo && (
             <div className="mt-3 text-xs text-slate-400 space-y-0.5">
               <p>
@@ -423,6 +663,8 @@ export default function AnalysisPage({ visible = true }: { visible?: boolean }) 
           cmapMax={cmapMax}
           onCmapMinChange={setCmapMin}
           onCmapMaxChange={setCmapMax}
+          restoreCalibration={restoreCalibration}
+          restoreVersion={restoreVersion}
         />
 
         {/* ROI Controls */}
@@ -454,28 +696,79 @@ export default function AnalysisPage({ visible = true }: { visible?: boolean }) 
         {sessionId && appliedCalibration && (
           <div className="p-4 border-t border-slate-600 mt-auto">
             <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">
-              Session
+              Save Analysis
             </h2>
+
+            {savedAnalysisId !== null && (
+              <p className="mb-2 text-xs text-sky-300">
+                Continuing saved analysis #{savedAnalysisId}
+              </p>
+            )}
+
+            <label className="block text-xs text-slate-400 mb-1">Project</label>
+            <select
+              value={projectId ?? ""}
+              onChange={(e) =>
+                setProjectId(e.target.value ? Number(e.target.value) : null)
+              }
+              className="w-full px-2 py-1.5 text-sm bg-slate-800 border border-slate-600 rounded text-slate-200 mb-2"
+            >
+              <option value="">Unfiled</option>
+              {projects.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name}
+                </option>
+              ))}
+            </select>
+
             <textarea
               value={notes}
               onChange={(e) => setNotes(e.target.value)}
-              placeholder="Session notes..."
+              placeholder="Analysis notes..."
               rows={2}
               className="w-full px-2 py-1.5 text-sm bg-slate-800 border border-slate-600 rounded text-slate-200 placeholder-slate-500 resize-none mb-2"
             />
-            <button
-              onClick={handleSave}
-              disabled={saving}
-              className={`w-full px-3 py-2 text-sm font-medium rounded-lg transition-colors ${
-                saving
-                  ? "bg-slate-600 text-slate-400 cursor-not-allowed"
-                  : saveSuccess
-                    ? "bg-emerald-600 text-white"
-                    : "bg-slate-600 hover:bg-slate-500 text-slate-200"
-              }`}
-            >
-              {saving ? "Saving..." : saveSuccess ? "Saved" : "Save Session"}
-            </button>
+
+            {!currentROI && (
+              <p className="mb-2 text-xs text-amber-400">
+                No ROI placed — the analysis will be saved without measurements.
+              </p>
+            )}
+
+            <div className="flex gap-2">
+              {savedAnalysisId !== null && (
+                <button
+                  onClick={() => handleSave(true)}
+                  disabled={saving}
+                  className={`flex-1 px-3 py-2 text-sm font-medium rounded-lg transition-colors ${
+                    saving
+                      ? "bg-slate-600 text-slate-400 cursor-not-allowed"
+                      : saveSuccess
+                        ? "bg-emerald-600 text-white"
+                        : "bg-sky-600 hover:bg-sky-500 text-white"
+                  }`}
+                >
+                  {saving ? "Saving..." : saveSuccess ? "Saved" : "Update Saved"}
+                </button>
+              )}
+              <button
+                onClick={() => handleSave(false)}
+                disabled={saving}
+                className={`flex-1 px-3 py-2 text-sm font-medium rounded-lg transition-colors ${
+                  saving
+                    ? "bg-slate-600 text-slate-400 cursor-not-allowed"
+                    : saveSuccess && savedAnalysisId === null
+                      ? "bg-emerald-600 text-white"
+                      : "bg-slate-600 hover:bg-slate-500 text-slate-200"
+                }`}
+              >
+                {savedAnalysisId !== null ? "Save as New" : "Save Analysis"}
+              </button>
+            </div>
+
+            {saveError && (
+              <p className="mt-2 text-xs text-red-400">{saveError}</p>
+            )}
           </div>
         )}
       </aside>
@@ -497,6 +790,8 @@ export default function AnalysisPage({ visible = true }: { visible?: boolean }) 
           onROIChange={handleROIChange}
           onCursorDose={handleCursorDose}
           getDoseAt={getDoseAt}
+          initialRoi={initialRoi}
+          initialRoiVersion={initialRoiVersion}
         />
 
         {/* Cursor dose readout overlay */}
@@ -527,7 +822,7 @@ export default function AnalysisPage({ visible = true }: { visible?: boolean }) 
         {isCalibrated && (
           <div className="absolute bottom-3 right-3 bg-slate-800/90 border border-slate-600 rounded-lg px-2 py-1.5 flex items-center gap-2">
             <span className="text-xs text-slate-400">Colormap:</span>
-            {(["jet", "viridis", "hot"] as ColormapName[]).map((cm) => (
+            {COLORMAPS.map((cm) => (
               <button
                 key={cm}
                 onClick={() => setColormap(cm)}

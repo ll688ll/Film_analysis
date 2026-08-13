@@ -32,6 +32,10 @@ interface ImageCanvasProps {
   onCursorDose?: (dose: number | null, x: number, y: number) => void;
   /** Function to look up dose at image coordinates */
   getDoseAt?: (x: number, y: number) => number | null;
+  /** ROI in image coordinates to draw when restoring a saved analysis. */
+  initialRoi?: ROIData | null;
+  /** Bump to apply `initialRoi`; the ROI is otherwise owned by user interaction. */
+  initialRoiVersion?: number;
 }
 
 export default function ImageCanvas({
@@ -49,6 +53,8 @@ export default function ImageCanvas({
   onROIChange,
   onCursorDose,
   getDoseAt,
+  initialRoi = null,
+  initialRoiVersion = 0,
 }: ImageCanvasProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const stageRef = useRef<Konva.Stage>(null);
@@ -63,6 +69,7 @@ export default function ImageCanvas({
 
   // ROI state in canvas coordinates
   const [roi, setRoi] = useState<ROIData | null>(null);
+  const appliedRoiVersionRef = useRef(0);
 
   // Determine what to display: dose map canvas takes priority
   const displaySource = doseMapCanvas ?? image;
@@ -122,6 +129,23 @@ export default function ImageCanvas({
     const offsetY = (containerSize.height - displayHeight * s) / 2;
     setImageOffset({ x: offsetX, y: offsetY });
   }, [displayWidth, displayHeight, containerSize]);
+
+  // Draw a restored ROI once the display and its scale exist. Loading a preview
+  // clears the ROI, so AnalysisPage bumps the version only after the dose map is
+  // in place; the ref makes each version apply exactly once.
+  useEffect(() => {
+    if (!initialRoi || initialRoiVersion === appliedRoiVersionRef.current) return;
+    if (!displaySource || !scale) return;
+
+    appliedRoiVersionRef.current = initialRoiVersion;
+    setRoi({
+      x: initialRoi.x * scale + imageOffset.x,
+      y: initialRoi.y * scale + imageOffset.y,
+      w: initialRoi.w * scale,
+      h: initialRoi.h * scale,
+      rotation: initialRoi.rotation,
+    });
+  }, [initialRoi, initialRoiVersion, displaySource, scale, imageOffset]);
 
   // When canvas pixels change (colormap/range), tell Konva to re-draw the image
   useEffect(() => {

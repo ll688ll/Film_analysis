@@ -1,5 +1,9 @@
 from pydantic_settings import BaseSettings
 
+# Single source of truth for the application version. Keep in sync with
+# frontend/package.json and the CHANGELOG.
+APP_VERSION = "1.2.0"
+
 
 class Settings(BaseSettings):
     SECRET_KEY: str = "change-me-in-production"
