@@ -4,6 +4,7 @@
 /calibration_config.json
 /.claude/
 /.venv/
+/backups/
 *.spec
 
 # Docker & app-specific
