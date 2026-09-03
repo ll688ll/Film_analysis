@@ -1,13 +1,13 @@
 import { useState, type FormEvent } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { useAuth } from "./AuthContext";
+import { sessionEndMessage, useAuth } from "./AuthContext";
 
 export default function LoginPage() {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
-  const { login } = useAuth();
+  const { login, endedReason, dismissEndedReason } = useAuth();
   const navigate = useNavigate();
 
   async function handleSubmit(e: FormEvent) {
@@ -55,6 +55,20 @@ export default function LoginPage() {
           <h2 className="text-xl font-semibold text-slate-800 mb-6">
             Sign in to your account
           </h2>
+
+          {endedReason && !error && (
+            <div className="mb-4 flex items-start gap-2 p-3 bg-amber-50 border border-amber-200 rounded-lg text-amber-800 text-sm">
+              <span className="flex-1">{sessionEndMessage(endedReason)}</span>
+              <button
+                type="button"
+                onClick={dismissEndedReason}
+                aria-label="Dismiss"
+                className="text-amber-500 hover:text-amber-700 leading-none"
+              >
+                &times;
+              </button>
+            </div>
+          )}
 
           {error && (
             <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm">

@@ -102,6 +102,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
     expose_headers=[
+        # Why a 401 happened (app.dependencies.get_current_user)
+        "X-Auth-Error",
         "X-Width", "X-Height",
         "X-Dose-Min", "X-Dose-Max", "X-Cmap-Min", "X-Cmap-Max",
         # Intensity bin-code plane (app.routers.imaging)

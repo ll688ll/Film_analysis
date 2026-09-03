@@ -152,3 +152,68 @@ async def test_me_invalid_token(client: AsyncClient):
         headers={"Authorization": "Bearer invalid.token.here"},
     )
     assert resp.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# 401 causes (X-Auth-Error)
+# ---------------------------------------------------------------------------
+
+async def test_me_expired_token_reports_expiry(client: AsyncClient):
+    """An expired token is reported as such, not as a generic failure."""
+    from datetime import timedelta
+
+    from app.auth import create_access_token
+
+    token = create_access_token(
+        {"sub": "ghost", "user_id": 1},
+        expires_delta=timedelta(minutes=-1),
+    )
+    resp = await client.get(
+        "/api/auth/me", headers={"Authorization": f"Bearer {token}"}
+    )
+    assert resp.status_code == 401
+    assert resp.headers["X-Auth-Error"] == "token_expired"
+    assert resp.json()["detail"] == "Session expired"
+
+
+async def test_me_garbage_token_reports_invalid(client: AsyncClient):
+    """A token the server cannot verify is distinguishable from an expired one."""
+    resp = await client.get(
+        "/api/auth/me",
+        headers={"Authorization": "Bearer invalid.token.here"},
+    )
+    assert resp.status_code == 401
+    assert resp.headers["X-Auth-Error"] == "invalid_token"
+
+
+async def test_me_unknown_user_reports_missing_account(client: AsyncClient):
+    """A well-signed token for a user that no longer exists says so."""
+    from app.auth import create_access_token
+
+    token = create_access_token({"sub": "ghost", "user_id": 999999})
+    resp = await client.get(
+        "/api/auth/me", headers={"Authorization": f"Bearer {token}"}
+    )
+    assert resp.status_code == 401
+    assert resp.headers["X-Auth-Error"] == "user_not_found"
+
+
+async def test_me_inactive_user_reports_disabled(
+    client: AsyncClient, auth_client: AsyncClient
+):
+    """A deactivated account is reported as disabled, not as a bad token."""
+    from sqlalchemy import select
+
+    from app.models import User
+    from tests.conftest import TestSessionLocal
+
+    async with TestSessionLocal() as session:
+        user = (
+            await session.execute(select(User).where(User.username == "testuser"))
+        ).scalar_one()
+        user.is_active = False
+        await session.commit()
+
+    resp = await auth_client.get("/api/auth/me")
+    assert resp.status_code == 401
+    assert resp.headers["X-Auth-Error"] == "user_inactive"
