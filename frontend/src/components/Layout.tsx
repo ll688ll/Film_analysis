@@ -1,6 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { NavLink } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
+import SessionExpiryBanner from "../auth/SessionExpiryBanner";
 import client from "../api/client";
 
 interface LayoutProps {
@@ -80,6 +81,8 @@ export default function Layout({ children }: LayoutProps) {
           </div>
         </div>
       </header>
+
+      <SessionExpiryBanner />
 
       {/* Main content area */}
       <main className="flex-1 flex flex-col overflow-hidden">{children}</main>

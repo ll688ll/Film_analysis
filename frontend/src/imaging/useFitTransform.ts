@@ -1,10 +1,10 @@
 /**
  * Container sizing, fit-to-view scaling, and zoom/pan for an image canvas.
  *
- * Adapted from the sizing logic in `analysis/ImageCanvas.tsx`, with a zoom
- * term added. That component is left untouched: its ROI/Transformer flow
- * assumes a single fit scale, and threading zoom through it is exactly where
- * an off-by-a-scale-factor bug would land on the flagship page.
+ * Grown out of the sizing logic in `analysis/ImageCanvas.tsx`, with a zoom
+ * term added. Both canvases now share it, so they zoom identically. The film
+ * canvas keeps its ROI in canvas coordinates and re-maps it whenever `scale`
+ * or `offset` changes, which is what lets zoom and pan reach it at all.
  *
  * Scale and offset are applied to the image *node*, not to the Stage, so
  * every coordinate conversion stays the same two-line formula regardless of
@@ -32,6 +32,10 @@ export interface Point {
 export function useFitTransform(contentWidth: number, contentHeight: number) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [containerSize, setContainerSize] = useState({ width: 800, height: 600 });
+  // False until the container reports a real size: a page mounts hidden (0x0)
+  // when the app opens on another tab, and anything placed against the
+  // placeholder size would land in the wrong spot.
+  const [measured, setMeasured] = useState(false);
   const [view, setView] = useState<View>(IDENTITY);
 
   useEffect(() => {
@@ -43,7 +47,10 @@ export function useFitTransform(contentWidth: number, contentHeight: number) {
         const { width, height } = entry.contentRect;
         // ProtectedTabs hides inactive pages with a `hidden` class, so the
         // container reports 0x0 while the tab is in the background.
-        if (width > 0 && height > 0) setContainerSize({ width, height });
+        if (width > 0 && height > 0) {
+          setContainerSize({ width, height });
+          setMeasured(true);
+        }
       }
     });
     observer.observe(container);
@@ -51,6 +58,7 @@ export function useFitTransform(contentWidth: number, contentHeight: number) {
     const rect = container.getBoundingClientRect();
     if (rect.width > 0 && rect.height > 0) {
       setContainerSize({ width: rect.width, height: rect.height });
+      setMeasured(true);
     }
 
     return () => observer.disconnect();
@@ -133,6 +141,7 @@ export function useFitTransform(contentWidth: number, contentHeight: number) {
   return {
     containerRef,
     containerSize,
+    measured,
     fitScale,
     scale,
     offset,

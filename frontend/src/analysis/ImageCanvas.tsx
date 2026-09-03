@@ -12,6 +12,7 @@ import {
   Transformer,
 } from "react-konva";
 import Konva from "konva";
+import { useFitTransform } from "../imaging/useFitTransform";
 import { profileHalfSpan } from "./profileMetrics";
 import type { Isoline, ProfileOffset, ROIData, ROIType } from "./roiTypes";
 
@@ -51,6 +52,29 @@ interface ImageCanvasProps {
   onProfileOffsetChange?: (offset: ProfileOffset) => void;
 }
 
+const zoomButtonClass =
+  "inline-flex items-center gap-1 px-2 py-1 text-xs bg-slate-800/90 border border-slate-600 rounded text-slate-200 hover:bg-slate-700 disabled:opacity-40 disabled:hover:bg-slate-800/90";
+
+const zoomButtonActiveClass =
+  "inline-flex items-center gap-1 px-2 py-1 text-xs bg-sky-600 border border-sky-500 rounded text-white hover:bg-sky-500";
+
+/** Open hand: the drag-to-move affordance, drawn inline like the panel icons. */
+const IconHand = () => (
+  <svg
+    width={12}
+    height={12}
+    viewBox="0 0 16 16"
+    fill="none"
+    stroke="currentColor"
+    strokeWidth={1.5}
+    strokeLinecap="round"
+    strokeLinejoin="round"
+    aria-hidden="true"
+  >
+    <path d="M5.5 7.5V3.75a1.15 1.15 0 0 1 2.3 0V7M7.8 7V2.9a1.15 1.15 0 0 1 2.3 0V7M10.1 7.2V4.4a1.15 1.15 0 0 1 2.3 0V9.4c0 2.3-1.7 4.1-4 4.1-1.4 0-2.4-.5-3.2-1.6L3.4 9.4a1.15 1.15 0 0 1 1.8-1.4l.9 1.1" />
+  </svg>
+);
+
 /** Keep a rotation in [0, 360) so the slider and the Transformer agree. */
 function normalizeDeg(deg: number): number {
   const d = deg % 360;
@@ -78,20 +102,16 @@ export default function ImageCanvas({
   profileCrosshair = null,
   onProfileOffsetChange,
 }: ImageCanvasProps) {
-  const containerRef = useRef<HTMLDivElement>(null);
   const stageRef = useRef<Konva.Stage>(null);
   const doseImageRef = useRef<Konva.Image | null>(null);
   const shapeRef = useRef<Konva.Rect | Konva.Ellipse | null>(null);
   const trRef = useRef<Konva.Transformer | null>(null);
 
-  const [containerSize, setContainerSize] = useState({ width: 800, height: 600 });
-  // False until the container has reported a real size: the page mounts
-  // hidden (0x0) when the app opens on another tab, and a ROI placed against
-  // the placeholder size would land in the wrong spot.
-  const [measured, setMeasured] = useState(false);
   const [image, setImage] = useState<HTMLImageElement | null>(null);
-  const [scale, setScale] = useState(1);
-  const [imageOffset, setImageOffset] = useState({ x: 0, y: 0 });
+  // Dragging the film moves the view only in pan mode. It defaults off so a
+  // stray drag on a measurement canvas cannot shift what the user is reading.
+  const [panMode, setPanMode] = useState(false);
+  const panRef = useRef<{ x: number; y: number } | null>(null);
 
   // ROI state in canvas coordinates. `x, y, w, h` is the unrotated box; the
   // rectangle is drawn about the box centre so that rotation matches the
@@ -104,30 +124,24 @@ export default function ImageCanvas({
   const displayWidth = doseMapCanvas ? (doseMapWidth ?? doseMapCanvas.width) : (image?.width ?? 0);
   const displayHeight = doseMapCanvas ? (doseMapHeight ?? doseMapCanvas.height) : (image?.height ?? 0);
 
-  // Observe container size
-  useEffect(() => {
-    const container = containerRef.current;
-    if (!container) return;
-
-    const observer = new ResizeObserver((entries) => {
-      for (const entry of entries) {
-        const { width, height } = entry.contentRect;
-        if (width > 0 && height > 0) {
-          setContainerSize({ width, height });
-          setMeasured(true);
-        }
-      }
-    });
-    observer.observe(container);
-
-    const rect = container.getBoundingClientRect();
-    if (rect.width > 0 && rect.height > 0) {
-      setContainerSize({ width: rect.width, height: rect.height });
-      setMeasured(true);
-    }
-
-    return () => observer.disconnect();
-  }, []);
+  // Container sizing, fit-to-view scale and the zoom/pan term, shared with the
+  // Image tab so both canvases zoom identically. `scale` and `imageOffset`
+  // already carry the zoom, so every overlay below -- ROI, isodose lines,
+  // profile crosshair, dose readout -- follows it with no further changes.
+  const {
+    containerRef,
+    containerSize,
+    measured,
+    scale,
+    offset: imageOffset,
+    zoom,
+    isFit,
+    zoomAt,
+    zoomIn,
+    zoomOut,
+    panBy,
+    fit,
+  } = useFitTransform(displayWidth, displayHeight);
 
   // Load image when URL changes (only used when no dose map canvas)
   useEffect(() => {
@@ -147,37 +161,37 @@ export default function ImageCanvas({
     };
   }, [imageUrl, doseMapCanvas]);
 
-  // Calculate scale and offset for image fitting. The ROI lives in canvas
-  // coordinates, so when the view re-fits (window or panel resized) it is
-  // re-mapped onto the same film pixels instead of staying where it was.
+  // The ROI lives in canvas coordinates, so any change to the view -- a resize,
+  // a zoom, a pan -- has to re-map it onto the same film pixels instead of
+  // leaving it where it sat on screen. Re-mapping only moves the drawn shape;
+  // the ROI reported to the backend is unchanged, so zooming never triggers a
+  // recalculation.
+  const prevViewRef = useRef<{ scale: number; x: number; y: number } | null>(null);
   useEffect(() => {
-    if (displayWidth === 0 || displayHeight === 0) return;
-    const scaleX = containerSize.width / displayWidth;
-    const scaleY = containerSize.height / displayHeight;
-    const s = Math.min(scaleX, scaleY);
-    const offsetX = (containerSize.width - displayWidth * s) / 2;
-    const offsetY = (containerSize.height - displayHeight * s) / 2;
-
-    const prevScale = scale;
-    const prevOffset = imageOffset;
-    if (s !== prevScale || offsetX !== prevOffset.x || offsetY !== prevOffset.y) {
-      setRoi((prev) => {
-        if (!prev || !prevScale) return prev;
-        const ratio = s / prevScale;
-        return {
-          x: ((prev.x - prevOffset.x) / prevScale) * s + offsetX,
-          y: ((prev.y - prevOffset.y) / prevScale) * s + offsetY,
-          w: prev.w * ratio,
-          h: prev.h * ratio,
-          rotation: prev.rotation,
-        };
-      });
+    const prev = prevViewRef.current;
+    prevViewRef.current = { scale, x: imageOffset.x, y: imageOffset.y };
+    if (!prev || !prev.scale) return;
+    if (prev.scale === scale && prev.x === imageOffset.x && prev.y === imageOffset.y) {
+      return;
     }
-    setScale(s);
-    setImageOffset({ x: offsetX, y: offsetY });
-    // scale/imageOffset are the values being replaced, not triggers
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [displayWidth, displayHeight, containerSize]);
+    setRoi((r) => {
+      if (!r) return r;
+      const ratio = scale / prev.scale;
+      return {
+        x: ((r.x - prev.x) / prev.scale) * scale + imageOffset.x,
+        y: ((r.y - prev.y) / prev.scale) * scale + imageOffset.y,
+        w: r.w * ratio,
+        h: r.h * ratio,
+        rotation: r.rotation,
+      };
+    });
+  }, [scale, imageOffset]);
+
+  // A different film starts at fit; recalculating the same one keeps the view,
+  // so an inspection at 8x survives pressing Recalculate.
+  useEffect(() => {
+    fit();
+  }, [imageUrl, displayWidth, displayHeight, fit]);
 
   // Draw a restored ROI once the display and its scale exist. Loading a preview
   // clears the ROI, so AnalysisPage bumps the version only after the dose map is
@@ -245,15 +259,65 @@ export default function ImageCanvas({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rotation]);
 
-  // Handle mouse move for dose readout
+  const setCursorStyle = useCallback((cursor: string) => {
+    const container = stageRef.current?.container();
+    if (container) container.style.cursor = cursor;
+  }, []);
+
+  const restingCursor = displaySource && panMode ? "grab" : "default";
+
+  useEffect(() => {
+    setCursorStyle(restingCursor);
+  }, [restingCursor, setCursorStyle]);
+
+  /** Wheel zooms about the cursor, so the detail under it stays put. */
+  const handleWheel = useCallback(
+    (e: Konva.KonvaEventObject<WheelEvent>) => {
+      if (!displaySource) return;
+      e.evt.preventDefault();
+      const pos = stageRef.current?.getPointerPosition();
+      if (!pos) return;
+      zoomAt(e.evt.deltaY < 0 ? 1.12 : 1 / 1.12, pos);
+    },
+    [displaySource, zoomAt]
+  );
+
+  const handleMouseDown = useCallback(
+    (e: Konva.KonvaEventObject<MouseEvent>) => {
+      if (!panMode) return;
+      // Only the background and the film pan; a drag that starts on the ROI,
+      // its handles or the crosshair belongs to that shape.
+      const target = e.target;
+      if (target !== stageRef.current && target !== doseImageRef.current) return;
+      const pos = stageRef.current?.getPointerPosition();
+      if (!pos) return;
+      panRef.current = { x: pos.x, y: pos.y };
+      setCursorStyle("grabbing");
+    },
+    [panMode, setCursorStyle]
+  );
+
+  const endPan = useCallback(() => {
+    if (!panRef.current) return;
+    panRef.current = null;
+    setCursorStyle(restingCursor);
+  }, [restingCursor, setCursorStyle]);
+
+  // Handle mouse move for panning and the dose readout
   const handleMouseMove = useCallback(
     (_e: Konva.KonvaEventObject<MouseEvent>) => {
-      if (!getDoseAt || !onCursorDose) return;
-
       const stage = stageRef.current;
       if (!stage) return;
       const pos = stage.getPointerPosition();
       if (!pos) return;
+
+      if (panRef.current) {
+        panBy(pos.x - panRef.current.x, pos.y - panRef.current.y);
+        panRef.current = { x: pos.x, y: pos.y };
+        return;
+      }
+
+      if (!getDoseAt || !onCursorDose) return;
 
       // Convert canvas coords to image coords
       const imgX = (pos.x - imageOffset.x) / scale;
@@ -262,12 +326,13 @@ export default function ImageCanvas({
       const dose = getDoseAt(imgX, imgY);
       onCursorDose(dose, imgX, imgY);
     },
-    [getDoseAt, onCursorDose, imageOffset, scale]
+    [getDoseAt, onCursorDose, imageOffset, scale, panBy]
   );
 
   const handleMouseLeave = useCallback(() => {
+    endPan();
     if (onCursorDose) onCursorDose(null, 0, 0);
-  }, [onCursorDose]);
+  }, [endPan, onCursorDose]);
 
   // Create ROI on double-click
   const handleStageClick = useCallback(
@@ -519,11 +584,6 @@ export default function ImageCanvas({
     [crosshair, profileCrosshair, onProfileOffsetChange, scale]
   );
 
-  const setCursor = useCallback((cursor: string) => {
-    const container = stageRef.current?.container();
-    if (container) container.style.cursor = cursor;
-  }, []);
-
   return (
     <div
       ref={containerRef}
@@ -560,6 +620,9 @@ export default function ImageCanvas({
         width={containerSize.width}
         height={containerSize.height}
         onDblClick={handleStageClick}
+        onWheel={handleWheel}
+        onMouseDown={handleMouseDown}
+        onMouseUp={endPan}
         onMouseMove={handleMouseMove}
         onMouseLeave={handleMouseLeave}
       >
@@ -698,8 +761,8 @@ export default function ImageCanvas({
                 draggable
                 dragBoundFunc={boundHLine}
                 onDragEnd={(e) => finishCrosshairDrag(e, "h")}
-                onMouseEnter={() => setCursor("move")}
-                onMouseLeave={() => setCursor("default")}
+                onMouseEnter={() => setCursorStyle("move")}
+                onMouseLeave={() => setCursorStyle(restingCursor)}
               />
               <Line
                 points={crosshair.vPoints}
@@ -710,8 +773,8 @@ export default function ImageCanvas({
                 draggable
                 dragBoundFunc={boundVLine}
                 onDragEnd={(e) => finishCrosshairDrag(e, "v")}
-                onMouseEnter={() => setCursor("move")}
-                onMouseLeave={() => setCursor("default")}
+                onMouseEnter={() => setCursorStyle("move")}
+                onMouseLeave={() => setCursorStyle(restingCursor)}
               />
               <Circle
                 x={crosshair.centre.x}
@@ -724,8 +787,8 @@ export default function ImageCanvas({
                 draggable
                 dragBoundFunc={boundCentre}
                 onDragEnd={(e) => finishCrosshairDrag(e, "centre")}
-                onMouseEnter={() => setCursor("move")}
-                onMouseLeave={() => setCursor("default")}
+                onMouseEnter={() => setCursorStyle("move")}
+                onMouseLeave={() => setCursorStyle(restingCursor)}
               />
             </Group>
           )}
@@ -758,6 +821,61 @@ export default function ImageCanvas({
           )}
         </Layer>
       </Stage>
+
+      {displaySource && (
+        // Below xl the canvas column is too narrow for this and the colormap
+        // selector to share the bottom row, so it sits one row higher.
+        <div className="absolute bottom-14 xl:bottom-3 left-3 flex items-center gap-2 px-2 py-1.5 rounded-lg bg-slate-900/80 backdrop-blur border border-slate-700">
+          <button
+            type="button"
+            onClick={zoomOut}
+            title="Zoom out"
+            className={zoomButtonClass}
+          >
+            &minus;
+          </button>
+          <span
+            className="text-xs text-slate-300 font-mono w-12 text-center"
+            title="Scroll to zoom, drag to pan"
+          >
+            {(zoom * 100).toFixed(0)}%
+          </span>
+          <button
+            type="button"
+            onClick={zoomIn}
+            title="Zoom in"
+            className={zoomButtonClass}
+          >
+            +
+          </button>
+          <button
+            type="button"
+            onClick={fit}
+            disabled={isFit}
+            title="Fit the whole film in view"
+            className={zoomButtonClass}
+          >
+            Fit
+          </button>
+
+          <div className="w-px h-5 bg-slate-700" />
+
+          <button
+            type="button"
+            onClick={() => setPanMode((v) => !v)}
+            aria-pressed={panMode}
+            title={
+              panMode
+                ? "Panning on — drag the film to move it"
+                : "Panning off — turn on to drag the film"
+            }
+            className={panMode ? zoomButtonActiveClass : zoomButtonClass}
+          >
+            <IconHand />
+            Pan
+          </button>
+        </div>
+      )}
     </div>
   );
 }

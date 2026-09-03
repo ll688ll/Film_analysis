@@ -4,6 +4,54 @@ All notable changes to the Film Analysis tool are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.4.0] - 2026-09-03
+
+Session handling, copyable statistics, and zoom on the Film Dose map.
+
+### Added
+
+- **Session expiry that returns you to the login screen.** The token's own
+  `exp` claim now drives the app: the session ends the moment it expires
+  rather than at the next failed request, and the login page says why —
+  "Your session timed out" for an expiry, a different message for a sign-in
+  the server no longer accepts. An amber banner counts down the last two
+  minutes so there is time to save work. The view re-checks on wake, since
+  timers do not run while the machine sleeps, and signing out in one tab
+  signs out the others. Token lifetime is unchanged at 24 hours.
+- **Click any value in the Stats table to copy it.** The clipboard gets the
+  number as shown, without the grouping commas or the unit, so it pastes into
+  a spreadsheet as a number. Hovering shows exactly what will be copied.
+- **Zoom and pan on the Film Dose map.** Scroll to zoom about the cursor,
+  0.1x-40x, with a bottom-left toolbar for zoom out/in, the current
+  percentage, and Fit. A **Pan** toggle, off by default, decides whether
+  dragging the film moves the view; the ROI, its handles, and the profile
+  crosshair are always dragged directly and never pan. Loading a different
+  film returns to fit, but Recalculate keeps the current view.
+
+### Changed
+
+- A 401 no longer reloads the page through `window.location`. The auth
+  context ends the session through the router, so the reason survives to the
+  login screen.
+- `get_current_user` reports the cause of a 401 in an `X-Auth-Error` header
+  (`token_expired`, `invalid_token`, `user_not_found`, `user_inactive`)
+  instead of answering every failure with "Could not validate credentials",
+  which made an ordinary expiry indistinguishable from a changed
+  `SECRET_KEY` or a deleted user.
+- `useFitTransform` is now shared by both canvases, so the Film Dose map and
+  the Image page zoom identically. The film canvas keeps its ROI in canvas
+  coordinates and re-maps it on any view change, which leaves the ROI pinned
+  to the same film pixels through zoom, pan and fit; the ROI sent to the
+  backend does not change, so zooming never triggers a recalculation.
+
+### Fixed
+
+- A wrong password on the login form no longer hard-reloads the page. The
+  401 from a sign-in attempt is left to the form, which keeps what was typed
+  and shows "Invalid credentials" inline.
+- The session-expiry banner is opaque with dark text. A translucent tint over
+  the light page background had left it nearly unreadable.
+
 ## [1.3.0] - 2026-09-02
 
 ROI analysis panel: the Film Dose page gains a foldable right-hand panel that
