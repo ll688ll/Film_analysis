@@ -2,7 +2,7 @@ from pydantic_settings import BaseSettings
 
 # Single source of truth for the application version. Keep in sync with
 # frontend/package.json and the CHANGELOG.
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.3.0"
 
 
 class Settings(BaseSettings):

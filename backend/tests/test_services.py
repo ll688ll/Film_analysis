@@ -8,7 +8,11 @@ from app.services.calibration import (
     fit_calibration_curves,
     rational_color_model,
 )
-from app.services.film_analyzer import FilmAnalyzer, build_roi_mask
+from app.services.film_analyzer import (
+    FilmAnalyzer,
+    build_roi_mask,
+    compute_dose_histogram,
+)
 from app.services.image_utils import generate_dose_map_preview, generate_preview, load_image
 
 
@@ -511,3 +515,113 @@ class TestFilmAnalyzer:
         stats = analyzer.get_roi_stats(mask, trim_enabled=True, trim_percent=49)
         # 49% of 2 values trims nothing (int truncation) — must not crash
         assert stats is None or isinstance(stats, dict)
+
+    def test_get_roi_stats_extended_keys(self):
+        analyzer = FilmAnalyzer()
+        analyzer.dose_map = np.linspace(1, 10, 10000).reshape(100, 100)
+        mask = np.ones((100, 100), dtype=bool)
+        stats = analyzer.get_roi_stats(mask)
+        for key in (
+            "median", "p2", "p98", "homogeneity_index",
+            "trimmed_count", "trim_low", "trim_high", "histogram",
+        ):
+            assert key in stats
+        assert stats["p2"] <= stats["median"] <= stats["p98"]
+        assert stats["homogeneity_index"] == pytest.approx(
+            (stats["p98"] - stats["p2"]) / stats["median"]
+        )
+        assert stats["trimmed_count"] == 10000
+        assert stats["trim_low"] is None
+        assert stats["trim_high"] is None
+        assert stats["histogram"]["total_count"] == 10000
+        assert sum(stats["histogram"]["counts"]) == 10000
+
+    def test_get_roi_stats_trim_cutoffs(self):
+        analyzer = FilmAnalyzer()
+        analyzer.dose_map = np.arange(100, dtype=float).reshape(10, 10)
+        mask = np.ones((10, 10), dtype=bool)
+        on = analyzer.get_roi_stats(mask, trim_enabled=True, trim_percent=2)
+        off = analyzer.get_roi_stats(mask, trim_enabled=False)
+        assert on["trim_low"] == on["min"] == 2.0
+        assert on["trim_high"] == on["max"] == 97.0
+        assert on["trimmed_count"] == 96
+        assert off["trim_low"] is None
+        assert off["trim_high"] is None
+        # The histogram describes every masked pixel, trimmed or not
+        assert on["histogram"] == off["histogram"]
+        assert on["histogram"]["total_count"] == 100
+
+    def test_get_roi_stats_single_pixel(self):
+        analyzer = FilmAnalyzer()
+        analyzer.dose_map = np.full((10, 10), 5.0)
+        mask = np.zeros((10, 10), dtype=bool)
+        mask[3, 3] = True
+        stats = analyzer.get_roi_stats(mask)
+        assert stats["median"] == 5.0
+        assert stats["homogeneity_index"] == 0
+        assert stats["trimmed_count"] == 1
+
+    def test_get_roi_stats_ignores_non_finite_pixels(self):
+        analyzer = FilmAnalyzer()
+        dose = np.full((10, 10), 4.0)
+        dose[0, 0] = np.nan
+        dose[0, 1] = np.inf
+        analyzer.dose_map = dose
+        mask = np.ones((10, 10), dtype=bool)
+        stats = analyzer.get_roi_stats(mask)
+        assert stats["mean"] == 4.0
+        assert stats["trimmed_count"] == 98
+        assert stats["histogram"]["total_count"] == 98
+
+    def test_get_roi_stats_can_skip_histogram(self):
+        analyzer = FilmAnalyzer()
+        analyzer.dose_map = np.random.uniform(1, 10, (20, 20))
+        stats = analyzer.get_roi_stats(
+            np.ones((20, 20), dtype=bool), histogram_bins=0
+        )
+        assert stats["histogram"] is None
+
+
+# ---------------------------------------------------------------------------
+# film_analyzer.compute_dose_histogram
+# ---------------------------------------------------------------------------
+
+
+class TestDoseHistogram:
+    def test_counts_sum_to_input(self):
+        values = np.random.default_rng(1).uniform(0, 5, 1000)
+        hist = compute_dose_histogram(values)
+        assert hist["bins"] == 64
+        assert len(hist["counts"]) == 64
+        assert sum(hist["counts"]) == 1000
+        assert hist["total_count"] == 1000
+        assert hist["value_min"] == pytest.approx(values.min())
+        assert hist["value_max"] == pytest.approx(values.max())
+        assert hist["bin_width"] == pytest.approx((values.max() - values.min()) / 64)
+
+    def test_extremes_land_in_end_bins(self):
+        hist = compute_dose_histogram(np.array([1.0, 2.0, 3.0]), bins=4)
+        assert hist["counts"] == [1, 0, 1, 1]
+
+    def test_constant_values_use_a_padded_window(self):
+        hist = compute_dose_histogram(np.full(50, 2.5))
+        assert hist["bin_width"] > 0
+        assert hist["value_min"] < 2.5 < hist["value_max"]
+        assert hist["counts"][32] == 50
+        assert sum(hist["counts"]) == 50
+
+    def test_ignores_non_finite(self):
+        values = np.array([1.0, np.nan, 2.0, np.inf, 3.0, -np.inf])
+        hist = compute_dose_histogram(values, bins=8)
+        assert hist["total_count"] == 3
+        assert sum(hist["counts"]) == 3
+
+    def test_empty_input(self):
+        hist = compute_dose_histogram(np.array([]), bins=16)
+        assert hist["counts"] == [0] * 16
+        assert hist["total_count"] == 0
+        assert hist["bin_width"] == 0.0
+
+    def test_rejects_zero_bins(self):
+        with pytest.raises(ValueError):
+            compute_dose_histogram(np.array([1.0]), bins=0)

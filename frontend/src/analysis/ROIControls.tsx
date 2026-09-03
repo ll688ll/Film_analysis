@@ -1,4 +1,6 @@
-export type ROIType = "Rectangle" | "Circle" | "Ring";
+import type { ROIType } from "./roiTypes";
+
+export type { ROIType } from "./roiTypes";
 
 interface ROIControlsProps {
   roiType: ROIType;
@@ -23,6 +25,16 @@ interface ROIControlsProps {
 
 const roiTypes: ROIType[] = ["Rectangle", "Circle", "Ring"];
 
+const numberCls =
+  "w-16 px-2 py-1 text-xs bg-slate-800 border border-slate-600 rounded text-slate-200 text-right disabled:opacity-50";
+const rowLabelCls = "w-24 flex-none text-xs text-slate-400";
+const hintCls = "flex-1 text-right text-xs text-slate-500";
+const unitCls = "w-6 flex-none text-xs text-slate-500";
+
+/**
+ * ROI shape and pixel-selection options. Rendered inside a section of the
+ * ROI panel, so it brings its own padding but no heading.
+ */
 export default function ROIControls({
   roiType,
   rotation,
@@ -44,16 +56,13 @@ export default function ROIControls({
   disabled,
 }: ROIControlsProps) {
   return (
-    <div className="p-4 border-b border-slate-600">
-      <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">
-        ROI Tools
-      </h2>
-
+    <div className="p-4 space-y-2.5">
       {/* ROI type selector */}
-      <div className="flex rounded-lg overflow-hidden border border-slate-600 mb-4">
+      <div className="flex rounded-lg overflow-hidden border border-slate-600">
         {roiTypes.map((t) => (
           <button
             key={t}
+            type="button"
             onClick={() => onROITypeChange(t)}
             disabled={disabled}
             className={`flex-1 px-2 py-1.5 text-xs font-medium transition-colors ${
@@ -69,74 +78,69 @@ export default function ROIControls({
 
       {/* Rotation (Rectangle only) */}
       {roiType === "Rectangle" && (
-        <div className="mb-3">
-          <label className="block text-xs text-slate-400 mb-1">
-            Rotation: {rotation}\u00B0
-          </label>
-          <div className="flex items-center gap-2">
-            <input
-              type="range"
-              min={0}
-              max={360}
-              value={rotation}
-              onChange={(e) => onRotationChange(Number(e.target.value))}
-              disabled={disabled}
-              className="flex-1 accent-sky-500"
-            />
-            <input
-              type="number"
-              min={0}
-              max={360}
-              value={rotation}
-              onChange={(e) =>
-                onRotationChange(
-                  Math.max(0, Math.min(360, Number(e.target.value)))
-                )
-              }
-              disabled={disabled}
-              className="w-16 px-2 py-1 text-xs bg-slate-800 border border-slate-600 rounded text-slate-200 text-right"
-            />
-          </div>
+        <div className="flex items-center gap-2">
+          <span className={rowLabelCls}>Rotation</span>
+          <input
+            type="range"
+            min={0}
+            max={360}
+            value={rotation}
+            onChange={(e) => onRotationChange(Number(e.target.value))}
+            disabled={disabled}
+            className="flex-1 min-w-0 accent-sky-500 disabled:opacity-50"
+            title="Rotate the rectangle about its centre"
+          />
+          <input
+            type="number"
+            min={0}
+            max={360}
+            value={rotation}
+            onChange={(e) =>
+              onRotationChange(
+                Math.max(0, Math.min(360, Number(e.target.value)))
+              )
+            }
+            disabled={disabled}
+            className={numberCls}
+          />
+          <span className={unitCls}>°</span>
         </div>
       )}
 
       {/* Hole ratio (Ring only) */}
       {roiType === "Ring" && (
-        <div className="mb-3">
-          <label className="block text-xs text-slate-400 mb-1">
-            Hole Ratio: {holeRatio}%
-          </label>
-          <div className="flex items-center gap-2">
-            <input
-              type="range"
-              min={10}
-              max={90}
-              value={holeRatio}
-              onChange={(e) => onHoleRatioChange(Number(e.target.value))}
-              disabled={disabled}
-              className="flex-1 accent-sky-500"
-            />
-            <input
-              type="number"
-              min={10}
-              max={90}
-              value={holeRatio}
-              onChange={(e) =>
-                onHoleRatioChange(
-                  Math.max(10, Math.min(90, Number(e.target.value)))
-                )
-              }
-              disabled={disabled}
-              className="w-16 px-2 py-1 text-xs bg-slate-800 border border-slate-600 rounded text-slate-200 text-right"
-            />
-          </div>
+        <div className="flex items-center gap-2">
+          <span className={rowLabelCls}>Hole ratio</span>
+          <input
+            type="range"
+            min={10}
+            max={90}
+            value={holeRatio}
+            onChange={(e) => onHoleRatioChange(Number(e.target.value))}
+            disabled={disabled}
+            className="flex-1 min-w-0 accent-sky-500 disabled:opacity-50"
+          />
+          <input
+            type="number"
+            min={10}
+            max={90}
+            value={holeRatio}
+            onChange={(e) =>
+              onHoleRatioChange(
+                Math.max(10, Math.min(90, Number(e.target.value)))
+              )
+            }
+            disabled={disabled}
+            className={numberCls}
+          />
+          <span className={unitCls}>%</span>
         </div>
       )}
 
       {/* Corner removal (Rectangle only) */}
       {roiType === "Rectangle" && (
-        <div className="mb-3">
-          <label className="flex items-center gap-2 text-xs text-slate-400 mb-1 cursor-pointer">
+        <div className="flex items-center gap-2">
+          <label className={`${rowLabelCls} flex items-center gap-2 cursor-pointer`}>
             <input
               type="checkbox"
               checked={cornerCutEnabled}
@@ -146,28 +150,25 @@ export default function ROIControls({
             />
             Remove corners
           </label>
-          <div className="flex items-center gap-2">
-            <span className="text-xs text-slate-500 flex-1">
-              Corner length (mm)
-            </span>
-            <input
-              type="number"
-              min={0}
-              step={0.5}
-              value={cornerCutMm}
-              onChange={(e) =>
-                onCornerCutMmChange(Math.max(0, Number(e.target.value)))
-              }
-              disabled={disabled || !cornerCutEnabled}
-              className="w-16 px-2 py-1 text-xs bg-slate-800 border border-slate-600 rounded text-slate-200 text-right disabled:opacity-50"
-            />
-          </div>
+          <span className={hintCls}>corner length</span>
+          <input
+            type="number"
+            min={0}
+            step={0.5}
+            value={cornerCutMm}
+            onChange={(e) =>
+              onCornerCutMmChange(Math.max(0, Number(e.target.value)))
+            }
+            disabled={disabled || !cornerCutEnabled}
+            className={numberCls}
+          />
+          <span className={unitCls}>mm</span>
         </div>
       )}
 
       {/* Remove max/min (trim) */}
-      <div className="mb-3">
-        <label className="flex items-center gap-2 text-xs text-slate-400 mb-1 cursor-pointer">
+      <div className="flex items-center gap-2">
+        <label className={`${rowLabelCls} flex items-center gap-2 cursor-pointer`}>
           <input
             type="checkbox"
             checked={trimEnabled}
@@ -175,34 +176,30 @@ export default function ROIControls({
             disabled={disabled}
             className="accent-sky-500"
           />
-          Remove max/min values
+          Trim max/min
         </label>
-        <div className="flex items-center gap-2">
-          <span className="text-xs text-slate-500 flex-1">
-            % per tail
-          </span>
-          <input
-            type="number"
-            min={0}
-            max={49}
-            step={0.5}
-            value={trimPercent}
-            onChange={(e) =>
-              onTrimPercentChange(
-                Math.max(0, Math.min(49, Number(e.target.value)))
-              )
-            }
-            disabled={disabled || !trimEnabled}
-            className="w-16 px-2 py-1 text-xs bg-slate-800 border border-slate-600 rounded text-slate-200 text-right disabled:opacity-50"
-          />
-        </div>
+        <span className={hintCls}>per tail</span>
+        <input
+          type="number"
+          min={0}
+          max={49}
+          step={0.5}
+          value={trimPercent}
+          onChange={(e) =>
+            onTrimPercentChange(
+              Math.max(0, Math.min(49, Number(e.target.value)))
+            )
+          }
+          disabled={disabled || !trimEnabled}
+          className={numberCls}
+        />
+        <span className={unitCls}>%</span>
       </div>
 
       {/* Threshold */}
-      <div className="mb-4">
-        <label className="block text-xs text-slate-400 mb-1">
-          Threshold (Gy)
-        </label>
+      <div className="flex items-center gap-2">
+        <span className={rowLabelCls}>Threshold</span>
+        <span className={hintCls}>exclude dose ≤</span>
         <input
           type="number"
           step="0.01"
@@ -210,21 +207,23 @@ export default function ROIControls({
           value={threshold}
           onChange={(e) => onThresholdChange(Number(e.target.value))}
           disabled={disabled}
-          className="w-full px-2 py-1.5 text-sm bg-slate-800 border border-slate-600 rounded text-slate-200"
+          className={numberCls}
         />
+        <span className={unitCls}>Gy</span>
       </div>
 
-      {/* Calculate button */}
+      {/* Recalculate (statistics also refresh automatically on every change) */}
       <button
+        type="button"
         onClick={onCalculate}
         disabled={disabled}
-        className={`w-full px-3 py-2 text-sm font-medium rounded-lg transition-colors ${
+        className={`w-full mt-1 px-3 py-1.5 text-xs font-medium rounded-lg transition-colors ${
           disabled
             ? "bg-slate-600 text-slate-400 cursor-not-allowed"
             : "bg-emerald-600 hover:bg-emerald-500 text-white"
         }`}
       >
-        Calculate ROI Stats
+        Recalculate
       </button>
     </div>
   );

@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import client from "../api/client";
 import { setSharedSession } from "../api/imageSession";
 import {
@@ -7,12 +7,20 @@ import {
   type RestorePayload,
 } from "../api/analysisTransfer";
 import CalibrationPanel, { type Profile } from "./CalibrationPanel";
-import ROIControls, { type ROIType } from "./ROIControls";
-import StatsPanel, { type ROIStats } from "./StatsPanel";
-import ImageCanvas from "./ImageCanvas";
+import ImageCanvas, { type RoiChangeReason } from "./ImageCanvas";
 import ColorBar from "./ColorBar";
+import RoiPanel from "./RoiPanel";
 import { useDoseMap } from "./useDoseMap";
 import type { ColormapName } from "./colormaps";
+import { ZERO_OFFSET, clampProfileOffset } from "./profileMetrics";
+import type {
+  Isoline,
+  ProfileOffset,
+  ROIData,
+  ROIStats,
+  ROIType,
+  RoiSettings,
+} from "./roiTypes";
 
 interface ImageInfo {
   width: number;
@@ -27,14 +35,6 @@ interface UploadResponse {
   height: number;
   dpi: number;
   channels: number;
-}
-
-interface ROIData {
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-  rotation: number;
 }
 
 interface ProjectSummary {
@@ -64,6 +64,7 @@ export default function AnalysisPage({ visible = true }: { visible?: boolean }) 
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [imageInfo, setImageInfo] = useState<ImageInfo | null>(null);
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
+  const [filmName, setFilmName] = useState<string | null>(null);
   const [isCalibrated, setIsCalibrated] = useState(false);
   const [calibrationVersion, setCalibrationVersion] = useState(0);
 
@@ -103,6 +104,15 @@ export default function AnalysisPage({ visible = true }: { visible?: boolean }) 
   // Stats
   const [stats, setStats] = useState<ROIStats | null>(null);
   const [statsLoading, setStatsLoading] = useState(false);
+  const [statsError, setStatsError] = useState<string | null>(null);
+
+  // Isodose lines the ROI panel asks to draw on the map
+  const [overlayIsolines, setOverlayIsolines] = useState<Isoline[] | null>(null);
+
+  // Where the profiles are taken (offsets from the ROI centre, image px) and
+  // whether the map should show the crosshair that moves them
+  const [profileOffset, setProfileOffset] = useState<ProfileOffset>(ZERO_OFFSET);
+  const [showProfileCrosshair, setShowProfileCrosshair] = useState(false);
 
   // UI state
   const [uploading, setUploading] = useState(false);
@@ -194,7 +204,10 @@ export default function AnalysisPage({ visible = true }: { visible?: boolean }) 
     setUploadError(null);
     setIsCalibrated(false);
     setStats(null);
+    setStatsError(null);
+    setOverlayIsolines(null);
     setCurrentROI(null);
+    setProfileOffset(ZERO_OFFSET);
     // A new film starts a new study; the next save must not overwrite the
     // analysis that happened to be open before.
     setSavedAnalysisId(null);
@@ -210,6 +223,7 @@ export default function AnalysisPage({ visible = true }: { visible?: boolean }) 
 
       const data = res.data;
       setSessionId(data.session_id);
+      setFilmName(file.name);
       setImageInfo({
         width: data.width,
         height: data.height,
@@ -274,6 +288,7 @@ export default function AnalysisPage({ visible = true }: { visible?: boolean }) 
         setIsCalibrated(true);
         setCalibrationVersion((v) => v + 1);
         setStats(null);
+        setStatsError(null);
         setAppliedCalibration({
           profile_id: params.profile_id,
           channel: params.channel,
@@ -297,10 +312,14 @@ export default function AnalysisPage({ visible = true }: { visible?: boolean }) 
       setRestoreError(null);
       setUploadError(null);
       setStats(null);
+      setStatsError(null);
+      setOverlayIsolines(null);
       setCurrentROI(null);
+      setProfileOffset(ZERO_OFFSET);
       setIsCalibrated(false);
 
       setSessionId(payload.session_id);
+      setFilmName(payload.original_filename ?? null);
       setSavedAnalysisId(payload.id);
       setProjectId(payload.project_id);
       setNotes(payload.notes || "");
@@ -418,8 +437,14 @@ export default function AnalysisPage({ visible = true }: { visible?: boolean }) 
           corner_cut_mm: cornerCutMm,
         });
         setStats(res.data);
+        setStatsError(null);
       } catch (err: any) {
         console.error("ROI stats error:", err);
+        // Stale numbers would misdescribe the ROI that is actually on screen.
+        setStats(null);
+        setStatsError(
+          err.response?.data?.detail || "Could not compute ROI statistics."
+        );
       } finally {
         setStatsLoading(false);
       }
@@ -441,8 +466,21 @@ export default function AnalysisPage({ visible = true }: { visible?: boolean }) 
 
   // ROI change callback (debounced)
   const handleROIChange = useCallback(
-    (roi: ROIData) => {
+    (roi: ROIData, reason: RoiChangeReason) => {
       setCurrentROI(roi);
+
+      // A fresh ROI starts with the profiles through its centre; a resize
+      // just keeps the crosshair inside the box.
+      setProfileOffset((prev) =>
+        reason === "place" ? ZERO_OFFSET : clampProfileOffset(prev, roi)
+      );
+
+      // Keep the Rotation control in step with the Transformer handle. The
+      // canvas snaps the rectangle to this whole-degree value in return.
+      if (roiType === "Rectangle") {
+        const deg = Math.round(roi.rotation) % 360;
+        setRotation((prev) => (prev === deg ? prev : deg));
+      }
 
       if (!isCalibrated) return;
 
@@ -451,10 +489,11 @@ export default function AnalysisPage({ visible = true }: { visible?: boolean }) 
         calculateStats(roi);
       }, 300);
     },
-    [isCalibrated, calculateStats]
+    [isCalibrated, calculateStats, roiType]
   );
 
-  // Recalculate stats when trim / corner-cut settings change (debounced)
+  // Recalculate stats when any pixel-selection option changes (debounced).
+  // Rotation arrives through handleROIChange, since it moves the ROI itself.
   useEffect(() => {
     if (!isCalibrated || !currentROI) return;
     if (debounceRef.current) clearTimeout(debounceRef.current);
@@ -462,7 +501,7 @@ export default function AnalysisPage({ visible = true }: { visible?: boolean }) 
       calculateStats();
     }, 300);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [trimEnabled, trimPercent, cornerCutEnabled, cornerCutMm]);
+  }, [roiType, holeRatio, threshold, trimEnabled, trimPercent, cornerCutEnabled, cornerCutMm]);
 
   // Recompute stats for a restored ROI rather than trusting the stored numbers,
   // so what is shown always matches the dose map currently on screen.
@@ -552,9 +591,42 @@ export default function AnalysisPage({ visible = true }: { visible?: boolean }) 
     ]
   );
 
+  // The ROI panel edits these through one callback
+  const roiSettings = useMemo<RoiSettings>(
+    () => ({
+      roiType,
+      rotation,
+      holeRatio,
+      threshold,
+      trimEnabled,
+      trimPercent,
+      cornerCutEnabled,
+      cornerCutMm,
+    }),
+    [roiType, rotation, holeRatio, threshold, trimEnabled, trimPercent, cornerCutEnabled, cornerCutMm]
+  );
+
+  const handleProfileOffsetChange = useCallback(
+    (offset: ProfileOffset) => {
+      setProfileOffset(currentROI ? clampProfileOffset(offset, currentROI) : offset);
+    },
+    [currentROI]
+  );
+
+  const handleSettingsChange = useCallback((patch: Partial<RoiSettings>) => {
+    if (patch.roiType !== undefined) setROIType(patch.roiType);
+    if (patch.rotation !== undefined) setRotation(patch.rotation);
+    if (patch.holeRatio !== undefined) setHoleRatio(patch.holeRatio);
+    if (patch.threshold !== undefined) setThreshold(patch.threshold);
+    if (patch.trimEnabled !== undefined) setTrimEnabled(patch.trimEnabled);
+    if (patch.trimPercent !== undefined) setTrimPercent(patch.trimPercent);
+    if (patch.cornerCutEnabled !== undefined) setCornerCutEnabled(patch.cornerCutEnabled);
+    if (patch.cornerCutMm !== undefined) setCornerCutMm(patch.cornerCutMm);
+  }, []);
+
   return (
     <div className="flex-1 flex overflow-hidden">
-      {/* Left Sidebar */}
+      {/* Left Sidebar: the film and its calibration */}
       <aside className="w-80 bg-slate-700 flex flex-col overflow-y-auto flex-shrink-0 border-r border-slate-600">
         {/* Upload Section */}
         <div className="p-4 border-b border-slate-600">
@@ -639,6 +711,11 @@ export default function AnalysisPage({ visible = true }: { visible?: boolean }) 
 
           {imageInfo && (
             <div className="mt-3 text-xs text-slate-400 space-y-0.5">
+              {filmName && (
+                <p className="text-slate-300 truncate" title={filmName}>
+                  {filmName}
+                </p>
+              )}
               <p>
                 {imageInfo.width} x {imageInfo.height} px | {imageInfo.dpi} DPI
               </p>
@@ -666,31 +743,6 @@ export default function AnalysisPage({ visible = true }: { visible?: boolean }) 
           restoreCalibration={restoreCalibration}
           restoreVersion={restoreVersion}
         />
-
-        {/* ROI Controls */}
-        <ROIControls
-          roiType={roiType}
-          rotation={rotation}
-          holeRatio={holeRatio}
-          threshold={threshold}
-          trimEnabled={trimEnabled}
-          trimPercent={trimPercent}
-          cornerCutEnabled={cornerCutEnabled}
-          cornerCutMm={cornerCutMm}
-          onROITypeChange={setROIType}
-          onRotationChange={setRotation}
-          onHoleRatioChange={setHoleRatio}
-          onThresholdChange={setThreshold}
-          onTrimEnabledChange={setTrimEnabled}
-          onTrimPercentChange={setTrimPercent}
-          onCornerCutEnabledChange={setCornerCutEnabled}
-          onCornerCutMmChange={setCornerCutMm}
-          onCalculate={() => calculateStats()}
-          disabled={!isCalibrated}
-        />
-
-        {/* Statistics */}
-        <StatsPanel stats={stats} loading={statsLoading} />
 
         {/* Save section */}
         {sessionId && appliedCalibration && (
@@ -725,8 +777,9 @@ export default function AnalysisPage({ visible = true }: { visible?: boolean }) 
               value={notes}
               onChange={(e) => setNotes(e.target.value)}
               placeholder="Analysis notes..."
-              rows={2}
-              className="w-full px-2 py-1.5 text-sm bg-slate-800 border border-slate-600 rounded text-slate-200 placeholder-slate-500 resize-none mb-2"
+              rows={3}
+              title="Drag the corner to make this box taller"
+              className="w-full px-2 py-1.5 text-sm bg-slate-800 border border-slate-600 rounded text-slate-200 placeholder-slate-500 resize-y min-h-[4.5rem] max-h-80 mb-2"
             />
 
             {!currentROI && (
@@ -774,7 +827,7 @@ export default function AnalysisPage({ visible = true }: { visible?: boolean }) 
       </aside>
 
       {/* Main Canvas Area */}
-      <div className="flex-1 relative">
+      <div className="flex-1 min-w-0 relative">
         <ImageCanvas
           imageUrl={previewUrl}
           doseMapCanvas={doseMapData?.canvas ?? null}
@@ -792,11 +845,14 @@ export default function AnalysisPage({ visible = true }: { visible?: boolean }) 
           getDoseAt={getDoseAt}
           initialRoi={initialRoi}
           initialRoiVersion={initialRoiVersion}
+          isolines={overlayIsolines}
+          profileCrosshair={showProfileCrosshair && currentROI ? profileOffset : null}
+          onProfileOffsetChange={handleProfileOffsetChange}
         />
 
         {/* Cursor dose readout overlay */}
         {cursorDose && (
-          <div className="absolute top-3 right-3 bg-slate-800/90 border border-slate-600 rounded-lg px-3 py-2 text-sm font-mono pointer-events-none">
+          <div className="absolute top-3 left-3 bg-slate-800/90 border border-slate-600 rounded-lg px-3 py-2 text-sm font-mono pointer-events-none">
             <span className="text-slate-400">Dose: </span>
             <span className="text-sky-300 font-semibold">
               {cursorDose.dose.toFixed(3)} Gy
@@ -838,6 +894,26 @@ export default function AnalysisPage({ visible = true }: { visible?: boolean }) 
           </div>
         )}
       </div>
+
+      {/* Right panel: ROI tools and analysis views */}
+      <RoiPanel
+        visible={visible}
+        settings={roiSettings}
+        onSettingsChange={handleSettingsChange}
+        onCalculate={() => calculateStats()}
+        controlsDisabled={!isCalibrated}
+        currentROI={currentROI}
+        stats={stats}
+        statsLoading={statsLoading}
+        statsError={statsError}
+        doseMapData={doseMapData}
+        dpi={imageInfo?.dpi ?? 72}
+        colormap={colormap}
+        filmName={filmName}
+        onOverlayIsolinesChange={setOverlayIsolines}
+        profileOffset={profileOffset}
+        onProfileCrosshairChange={setShowProfileCrosshair}
+      />
     </div>
   );
 }

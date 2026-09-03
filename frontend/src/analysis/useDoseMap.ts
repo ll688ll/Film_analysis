@@ -137,6 +137,7 @@ export function useDoseMap({
         cmapMax: cMax,
       });
     } catch (err: any) {
+      console.error("Dose data error:", err);
       setError(err.response?.data?.detail || "Failed to load dose data");
     } finally {
       setLoading(false);

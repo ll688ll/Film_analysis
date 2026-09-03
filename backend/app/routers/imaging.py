@@ -11,12 +11,11 @@ therefore costs no network round-trip. See :mod:`app.services.intensity`.
 
 from __future__ import annotations
 
-import io
 from typing import Literal
 
 import numpy as np
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile, status
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from app.dependencies import get_current_user
@@ -309,8 +308,10 @@ async def intensity_plane(
         # entry in the CORS middleware would only surface in production.
         "Access-Control-Expose-Headers": ", ".join(PLANE_HEADERS),
     }
-    return StreamingResponse(
-        io.BytesIO(codes.tobytes()),
+    # One body with a Content-Length: streaming a BytesIO iterates it line by
+    # line, chunking the binary plane at every 0x0A byte.
+    return Response(
+        content=codes.tobytes(),
         media_type="application/octet-stream",
         headers=headers,
     )

@@ -10,7 +10,7 @@ from pathlib import Path
 
 import numpy as np
 from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, status
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -451,7 +451,7 @@ async def preview_image(
 ):
     entry = _get_cache_entry(request, session_id, current_user.id)
     jpeg_bytes = generate_preview(entry["image_array"])
-    return StreamingResponse(io.BytesIO(jpeg_bytes), media_type="image/jpeg")
+    return Response(content=jpeg_bytes, media_type="image/jpeg")
 
 
 @router.post("/{session_id}/calibrate")
@@ -507,7 +507,7 @@ async def dose_preview(
         cmap_min=entry.get("cmap_min", 0),
         cmap_max=entry.get("cmap_max", 40),
     )
-    return StreamingResponse(io.BytesIO(png_bytes), media_type="image/png")
+    return Response(content=png_bytes, media_type="image/png")
 
 
 @router.get("/{session_id}/dose-data")
@@ -549,8 +549,12 @@ async def dose_data(
         "Access-Control-Expose-Headers": "X-Width, X-Height, X-Dose-Min, X-Dose-Max, X-Cmap-Min, X-Cmap-Max",
     }
 
-    return StreamingResponse(
-        io.BytesIO(clean.tobytes()),
+    # A plain Response sends the array as one body with a Content-Length.
+    # Streaming a BytesIO iterates it *line by line*: every 0x0A byte in the
+    # float data ends a chunk, so a 4 MB map became ~16k HTTP chunks and took
+    # over 30 s to arrive.
+    return Response(
+        content=clean.tobytes(),
         media_type="application/octet-stream",
         headers=custom_headers,
     )
@@ -632,6 +636,12 @@ async def compute_roi(
     stats["corner_cut_mm"] = (
         body.corner_cut_mm if corner_cut_px > 0 else 0.0
     )
+
+    # A ROI whose minimum is zero yields inf for dur/flatness (and cv when the
+    # mean is zero). Strict JSON has no inf, so the response would fail to
+    # serialise; send null instead, which the client already renders as "—".
+    for key in ("cv", "dur", "flatness", "homogeneity_index"):
+        stats[key] = _finite(stats.get(key))
 
     return stats
 

@@ -1,15 +1,21 @@
-import { useRef, useState, useEffect, useCallback } from "react";
-import { Stage, Layer, Image as KonvaImage, Rect, Ellipse, Line, Transformer } from "react-konva";
+import { useRef, useState, useEffect, useCallback, useMemo } from "react";
+import {
+  Stage,
+  Layer,
+  Image as KonvaImage,
+  Rect,
+  Ellipse,
+  Circle,
+  Line,
+  Group,
+  Shape,
+  Transformer,
+} from "react-konva";
 import Konva from "konva";
-import type { ROIType } from "./ROIControls";
+import { profileHalfSpan } from "./profileMetrics";
+import type { Isoline, ProfileOffset, ROIData, ROIType } from "./roiTypes";
 
-interface ROIData {
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-  rotation: number;
-}
+export type RoiChangeReason = "place" | "edit";
 
 interface ImageCanvasProps {
   imageUrl: string | null;
@@ -21,13 +27,15 @@ interface ImageCanvasProps {
   /** Increments when canvas pixels change — forces Konva to redraw */
   canvasVersion?: number;
   roiType: ROIType;
+  /** Rotation of the rectangle ROI in degrees; rotating the handle reports back through onROIChange. */
   rotation: number;
   holeRatio: number;
   /** Rectangle corner removal: draw chamfered outline when enabled */
   cornerCutEnabled: boolean;
   cornerCutMm: number;
   dpi: number;
-  onROIChange: (roi: ROIData) => void;
+  /** `place` for a fresh double-click ROI, `edit` for a move, resize or rotation. */
+  onROIChange: (roi: ROIData, reason: RoiChangeReason) => void;
   /** Called with dose value at cursor position, or null when cursor leaves image */
   onCursorDose?: (dose: number | null, x: number, y: number) => void;
   /** Function to look up dose at image coordinates */
@@ -36,6 +44,17 @@ interface ImageCanvasProps {
   initialRoi?: ROIData | null;
   /** Bump to apply `initialRoi`; the ROI is otherwise owned by user interaction. */
   initialRoiVersion?: number;
+  /** Isodose lines (image pixels) drawn over the map; null hides them. */
+  isolines?: Isoline[] | null;
+  /** Profile crosshair offsets from the ROI centre (image px); null hides it. */
+  profileCrosshair?: ProfileOffset | null;
+  onProfileOffsetChange?: (offset: ProfileOffset) => void;
+}
+
+/** Keep a rotation in [0, 360) so the slider and the Transformer agree. */
+function normalizeDeg(deg: number): number {
+  const d = deg % 360;
+  return d < 0 ? d + 360 : d;
 }
 
 export default function ImageCanvas({
@@ -55,6 +74,9 @@ export default function ImageCanvas({
   getDoseAt,
   initialRoi = null,
   initialRoiVersion = 0,
+  isolines = null,
+  profileCrosshair = null,
+  onProfileOffsetChange,
 }: ImageCanvasProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const stageRef = useRef<Konva.Stage>(null);
@@ -63,11 +85,17 @@ export default function ImageCanvas({
   const trRef = useRef<Konva.Transformer | null>(null);
 
   const [containerSize, setContainerSize] = useState({ width: 800, height: 600 });
+  // False until the container has reported a real size: the page mounts
+  // hidden (0x0) when the app opens on another tab, and a ROI placed against
+  // the placeholder size would land in the wrong spot.
+  const [measured, setMeasured] = useState(false);
   const [image, setImage] = useState<HTMLImageElement | null>(null);
   const [scale, setScale] = useState(1);
   const [imageOffset, setImageOffset] = useState({ x: 0, y: 0 });
 
-  // ROI state in canvas coordinates
+  // ROI state in canvas coordinates. `x, y, w, h` is the unrotated box; the
+  // rectangle is drawn about the box centre so that rotation matches the
+  // backend mask, which also rotates about (x + w/2, y + h/2).
   const [roi, setRoi] = useState<ROIData | null>(null);
   const appliedRoiVersionRef = useRef(0);
 
@@ -86,6 +114,7 @@ export default function ImageCanvas({
         const { width, height } = entry.contentRect;
         if (width > 0 && height > 0) {
           setContainerSize({ width, height });
+          setMeasured(true);
         }
       }
     });
@@ -94,6 +123,7 @@ export default function ImageCanvas({
     const rect = container.getBoundingClientRect();
     if (rect.width > 0 && rect.height > 0) {
       setContainerSize({ width: rect.width, height: rect.height });
+      setMeasured(true);
     }
 
     return () => observer.disconnect();
@@ -117,17 +147,36 @@ export default function ImageCanvas({
     };
   }, [imageUrl, doseMapCanvas]);
 
-  // Calculate scale and offset for image fitting
+  // Calculate scale and offset for image fitting. The ROI lives in canvas
+  // coordinates, so when the view re-fits (window or panel resized) it is
+  // re-mapped onto the same film pixels instead of staying where it was.
   useEffect(() => {
     if (displayWidth === 0 || displayHeight === 0) return;
     const scaleX = containerSize.width / displayWidth;
     const scaleY = containerSize.height / displayHeight;
     const s = Math.min(scaleX, scaleY);
-    setScale(s);
-
     const offsetX = (containerSize.width - displayWidth * s) / 2;
     const offsetY = (containerSize.height - displayHeight * s) / 2;
+
+    const prevScale = scale;
+    const prevOffset = imageOffset;
+    if (s !== prevScale || offsetX !== prevOffset.x || offsetY !== prevOffset.y) {
+      setRoi((prev) => {
+        if (!prev || !prevScale) return prev;
+        const ratio = s / prevScale;
+        return {
+          x: ((prev.x - prevOffset.x) / prevScale) * s + offsetX,
+          y: ((prev.y - prevOffset.y) / prevScale) * s + offsetY,
+          w: prev.w * ratio,
+          h: prev.h * ratio,
+          rotation: prev.rotation,
+        };
+      });
+    }
+    setScale(s);
     setImageOffset({ x: offsetX, y: offsetY });
+    // scale/imageOffset are the values being replaced, not triggers
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [displayWidth, displayHeight, containerSize]);
 
   // Draw a restored ROI once the display and its scale exist. Loading a preview
@@ -135,7 +184,7 @@ export default function ImageCanvas({
   // in place; the ref makes each version apply exactly once.
   useEffect(() => {
     if (!initialRoi || initialRoiVersion === appliedRoiVersionRef.current) return;
-    if (!displaySource || !scale) return;
+    if (!displaySource || !scale || !measured) return;
 
     appliedRoiVersionRef.current = initialRoiVersion;
     setRoi({
@@ -143,9 +192,9 @@ export default function ImageCanvas({
       y: initialRoi.y * scale + imageOffset.y,
       w: initialRoi.w * scale,
       h: initialRoi.h * scale,
-      rotation: initialRoi.rotation,
+      rotation: normalizeDeg(initialRoi.rotation),
     });
-  }, [initialRoi, initialRoiVersion, displaySource, scale, imageOffset]);
+  }, [initialRoi, initialRoiVersion, displaySource, scale, imageOffset, measured]);
 
   // When canvas pixels change (colormap/range), tell Konva to re-draw the image
   useEffect(() => {
@@ -168,18 +217,33 @@ export default function ImageCanvas({
 
   // Emit ROI change in image coordinates
   const emitROIChange = useCallback(
-    (canvasRoi: ROIData) => {
+    (canvasRoi: ROIData, reason: RoiChangeReason = "edit") => {
       if (!scale || scale === 0) return;
-      onROIChange({
-        x: (canvasRoi.x - imageOffset.x) / scale,
-        y: (canvasRoi.y - imageOffset.y) / scale,
-        w: canvasRoi.w / scale,
-        h: canvasRoi.h / scale,
-        rotation: canvasRoi.rotation,
-      });
+      onROIChange(
+        {
+          x: (canvasRoi.x - imageOffset.x) / scale,
+          y: (canvasRoi.y - imageOffset.y) / scale,
+          w: canvasRoi.w / scale,
+          h: canvasRoi.h / scale,
+          rotation: canvasRoi.rotation,
+        },
+        reason
+      );
     },
     [scale, imageOffset, onROIChange]
   );
+
+  // The Rotation control rotates the current rectangle. The Transformer handle
+  // reports its angle back through onROIChange, so only act when they differ.
+  useEffect(() => {
+    if (roiType !== "Rectangle" || !roi) return;
+    const target = normalizeDeg(rotation);
+    if (roi.rotation === target) return;
+    const next = { ...roi, rotation: target };
+    setRoi(next);
+    emitROIChange(next);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rotation]);
 
   // Handle mouse move for dose readout
   const handleMouseMove = useCallback(
@@ -210,9 +274,10 @@ export default function ImageCanvas({
     (e: Konva.KonvaEventObject<MouseEvent>) => {
       if (!displaySource) return;
 
-      // If clicking on a shape (not the stage background), ignore
+      // Only the stage background or the film itself places a ROI; a
+      // double-click on the existing ROI or its handles is left alone.
       const target = e.target;
-      if (target !== stageRef.current) return;
+      if (target !== stageRef.current && target !== doseImageRef.current) return;
 
       const stage = stageRef.current;
       if (!stage) return;
@@ -227,11 +292,11 @@ export default function ImageCanvas({
         y: pos.y - defaultH / 2,
         w: defaultW,
         h: defaultH,
-        rotation: roiType === "Rectangle" ? rotation : 0,
+        rotation: roiType === "Rectangle" ? normalizeDeg(rotation) : 0,
       };
 
       setRoi(newRoi);
-      emitROIChange(newRoi);
+      emitROIChange(newRoi, "place");
     },
     [displaySource, roiType, rotation, emitROIChange]
   );
@@ -242,14 +307,18 @@ export default function ImageCanvas({
     if (!node) return;
 
     if (roiType === "Rectangle") {
+      // With the offset at the box centre, node.x()/y() is the visual centre
+      // whatever the scale, so the box follows from the new size.
       const sx = node.scaleX();
       const sy = node.scaleY();
+      const w = Math.max(5, node.width() * sx);
+      const h = Math.max(5, node.height() * sy);
       const newRoi: ROIData = {
-        x: node.x(),
-        y: node.y(),
-        w: Math.max(5, node.width() * sx),
-        h: Math.max(5, node.height() * sy),
-        rotation: node.rotation(),
+        x: node.x() - w / 2,
+        y: node.y() - h / 2,
+        w,
+        h,
+        rotation: normalizeDeg(node.rotation()),
       };
       node.scaleX(1);
       node.scaleY(1);
@@ -266,7 +335,7 @@ export default function ImageCanvas({
         y: node.y() - ry,
         w: rx * 2,
         h: ry * 2,
-        rotation: node.rotation(),
+        rotation: 0,
       };
       node.scaleX(1);
       node.scaleY(1);
@@ -283,12 +352,14 @@ export default function ImageCanvas({
     if (!node) return;
 
     if (roiType === "Rectangle") {
+      const w = roi?.w ?? 100;
+      const h = roi?.h ?? 100;
       const newRoi: ROIData = {
-        x: node.x(),
-        y: node.y(),
-        w: roi?.w ?? 100,
-        h: roi?.h ?? 100,
-        rotation: node.rotation(),
+        x: node.x() - w / 2,
+        y: node.y() - h / 2,
+        w,
+        h,
+        rotation: normalizeDeg(node.rotation()),
       };
       setRoi(newRoi);
       emitROIChange(newRoi);
@@ -319,6 +390,139 @@ export default function ImageCanvas({
     },
     []
   );
+
+  // Isodose lines: image px -> canvas px, flattened for Konva
+  const canvasIsolines = useMemo(() => {
+    if (!isolines || !scale) return null;
+    const out: number[][] = [];
+    for (const iso of isolines) {
+      for (const path of iso.paths) {
+        const pts = new Array<number>(path.length);
+        for (let i = 0; i < path.length; i += 2) {
+          pts[i] = path[i] * scale + imageOffset.x;
+          pts[i + 1] = path[i + 1] * scale + imageOffset.y;
+        }
+        out.push(pts);
+      }
+    }
+    return out;
+  }, [isolines, scale, imageOffset]);
+
+  // One Konva node strokes every path at once; a node per path would be
+  // thousands of shapes on a noisy film.
+  const drawIsolines = useCallback(
+    (ctx: Konva.Context, shape: Konva.Shape) => {
+      if (!canvasIsolines) return;
+      ctx.beginPath();
+      for (const pts of canvasIsolines) {
+        if (pts.length < 4) continue;
+        ctx.moveTo(pts[0], pts[1]);
+        for (let i = 2; i < pts.length; i += 2) ctx.lineTo(pts[i], pts[i + 1]);
+      }
+      ctx.strokeShape(shape);
+    },
+    [canvasIsolines]
+  );
+
+  // Profile crosshair in canvas coordinates: the two sampled lines and the
+  // point where they cross, all relative to the ROI centre along its axes.
+  const crosshair = useMemo(() => {
+    if (!profileCrosshair || !roi || !scale) return null;
+    const t = (roi.rotation * Math.PI) / 180;
+    const ux = Math.cos(t);
+    const uy = Math.sin(t);
+    const vx = -Math.sin(t);
+    const vy = Math.cos(t);
+    const cx = roi.x + roi.w / 2;
+    const cy = roi.y + roi.h / 2;
+    const u0 = profileCrosshair.u * scale;
+    const v0 = profileCrosshair.v * scale;
+    const imageRoi = { ...roi, w: roi.w / scale, h: roi.h / scale };
+    const spanU = profileHalfSpan(imageRoi, "h") * scale;
+    const spanV = profileHalfSpan(imageRoi, "v") * scale;
+    return {
+      ux, uy, vx, vy,
+      halfU: roi.w / 2,
+      halfV: roi.h / 2,
+      u0, v0,
+      centre: { x: cx + u0 * ux + v0 * vx, y: cy + u0 * uy + v0 * vy },
+      hPoints: [
+        cx - spanU * ux + v0 * vx, cy - spanU * uy + v0 * vy,
+        cx + spanU * ux + v0 * vx, cy + spanU * uy + v0 * vy,
+      ],
+      vPoints: [
+        cx + u0 * ux - spanV * vx, cy + u0 * uy - spanV * vy,
+        cx + u0 * ux + spanV * vx, cy + u0 * uy + spanV * vy,
+      ],
+    };
+  }, [profileCrosshair, roi, scale]);
+
+  // Drags are pure translations of nodes that start at (0, 0), so a node's
+  // position is the displacement; it is projected onto the allowed axis and
+  // clamped to the ROI box, then folded back into the offsets in image px.
+  const clampAlong = (d: number, current: number, half: number) =>
+    Math.max(-half - current, Math.min(half - current, d));
+
+  const boundHLine = useCallback(
+    (pos: Konva.Vector2d): Konva.Vector2d => {
+      if (!crosshair) return pos;
+      const { vx, vy, v0, halfV } = crosshair;
+      const d = clampAlong(pos.x * vx + pos.y * vy, v0, halfV);
+      return { x: d * vx, y: d * vy };
+    },
+    [crosshair]
+  );
+  const boundVLine = useCallback(
+    (pos: Konva.Vector2d): Konva.Vector2d => {
+      if (!crosshair) return pos;
+      const { ux, uy, u0, halfU } = crosshair;
+      const d = clampAlong(pos.x * ux + pos.y * uy, u0, halfU);
+      return { x: d * ux, y: d * uy };
+    },
+    [crosshair]
+  );
+  const boundCentre = useCallback(
+    (pos: Konva.Vector2d): Konva.Vector2d => {
+      if (!crosshair) return pos;
+      const { ux, uy, vx, vy, u0, v0, halfU, halfV } = crosshair;
+      // The circle's own position is its centre, so subtract it first
+      const dx = pos.x - crosshair.centre.x;
+      const dy = pos.y - crosshair.centre.y;
+      const du = clampAlong(dx * ux + dy * uy, u0, halfU);
+      const dv = clampAlong(dx * vx + dy * vy, v0, halfV);
+      return {
+        x: crosshair.centre.x + du * ux + dv * vx,
+        y: crosshair.centre.y + du * uy + dv * vy,
+      };
+    },
+    [crosshair]
+  );
+
+  const finishCrosshairDrag = useCallback(
+    (e: Konva.KonvaEventObject<DragEvent>, what: "h" | "v" | "centre") => {
+      if (!crosshair || !profileCrosshair || !onProfileOffsetChange) return;
+      const node = e.target;
+      const { ux, uy, vx, vy } = crosshair;
+      let dx = node.x();
+      let dy = node.y();
+      if (what === "centre") {
+        dx -= crosshair.centre.x;
+        dy -= crosshair.centre.y;
+        node.position(crosshair.centre);
+      } else {
+        node.position({ x: 0, y: 0 });
+      }
+      const du = what === "h" ? 0 : (dx * ux + dy * uy) / scale;
+      const dv = what === "v" ? 0 : (dx * vx + dy * vy) / scale;
+      onProfileOffsetChange({ u: profileCrosshair.u + du, v: profileCrosshair.v + dv });
+    },
+    [crosshair, profileCrosshair, onProfileOffsetChange, scale]
+  );
+
+  const setCursor = useCallback((cursor: string) => {
+    const container = stageRef.current?.container();
+    if (container) container.style.cursor = cursor;
+  }, []);
 
   return (
     <div
@@ -371,12 +575,37 @@ export default function ImageCanvas({
             />
           )}
 
+          {/* Isodose overlay sits under the ROI so the handles stay on top */}
+          {canvasIsolines && canvasIsolines.length > 0 && (
+            <Group listening={false}>
+              <Shape
+                sceneFunc={drawIsolines}
+                stroke="#0f172a"
+                strokeWidth={3}
+                opacity={0.6}
+                lineJoin="round"
+                lineCap="round"
+                perfectDrawEnabled={false}
+              />
+              <Shape
+                sceneFunc={drawIsolines}
+                stroke="#ffffff"
+                strokeWidth={1.25}
+                lineJoin="round"
+                lineCap="round"
+                perfectDrawEnabled={false}
+              />
+            </Group>
+          )}
+
           {roi && roiType === "Rectangle" && (
             <>
               <Rect
                 ref={setShapeRef as (node: Konva.Rect | null) => void}
-                x={roi.x}
-                y={roi.y}
+                x={roi.x + roi.w / 2}
+                y={roi.y + roi.h / 2}
+                offsetX={roi.w / 2}
+                offsetY={roi.h / 2}
                 width={roi.w}
                 height={roi.h}
                 rotation={roi.rotation}
@@ -407,8 +636,10 @@ export default function ImageCanvas({
                 ];
                 return (
                   <Line
-                    x={roi.x}
-                    y={roi.y}
+                    x={roi.x + roi.w / 2}
+                    y={roi.y + roi.h / 2}
+                    offsetX={roi.w / 2}
+                    offsetY={roi.h / 2}
                     rotation={roi.rotation}
                     points={pts}
                     closed
@@ -419,17 +650,6 @@ export default function ImageCanvas({
                   />
                 );
               })()}
-              <Transformer
-                ref={(node: Konva.Transformer | null) => { trRef.current = node; }}
-                rotateEnabled
-                keepRatio={false}
-                borderStroke="#22d3ee"
-                borderStrokeWidth={1}
-                anchorStroke="#22d3ee"
-                anchorFill="#0e7490"
-                anchorSize={8}
-                anchorCornerRadius={2}
-              />
             </>
           )}
 
@@ -462,18 +682,79 @@ export default function ImageCanvas({
                   listening={false}
                 />
               )}
-              <Transformer
-                ref={(node: Konva.Transformer | null) => { trRef.current = node; }}
-                rotateEnabled={false}
-                keepRatio={roiType === "Circle"}
-                borderStroke="#22d3ee"
-                borderStrokeWidth={1}
-                anchorStroke="#22d3ee"
-                anchorFill="#0e7490"
-                anchorSize={8}
-                anchorCornerRadius={2}
-              />
             </>
+          )}
+
+          {/* Profile crosshair: above the ROI shape so it can be grabbed, below
+              the Transformer so the resize handles keep priority */}
+          {crosshair && (
+            <Group>
+              <Line
+                points={crosshair.hPoints}
+                stroke="#facc15"
+                strokeWidth={1.5}
+                dash={[8, 4]}
+                hitStrokeWidth={16}
+                draggable
+                dragBoundFunc={boundHLine}
+                onDragEnd={(e) => finishCrosshairDrag(e, "h")}
+                onMouseEnter={() => setCursor("move")}
+                onMouseLeave={() => setCursor("default")}
+              />
+              <Line
+                points={crosshair.vPoints}
+                stroke="#facc15"
+                strokeWidth={1.5}
+                dash={[8, 4]}
+                hitStrokeWidth={16}
+                draggable
+                dragBoundFunc={boundVLine}
+                onDragEnd={(e) => finishCrosshairDrag(e, "v")}
+                onMouseEnter={() => setCursor("move")}
+                onMouseLeave={() => setCursor("default")}
+              />
+              <Circle
+                x={crosshair.centre.x}
+                y={crosshair.centre.y}
+                radius={6}
+                fill="#facc15"
+                stroke="#0f172a"
+                strokeWidth={1.5}
+                hitStrokeWidth={12}
+                draggable
+                dragBoundFunc={boundCentre}
+                onDragEnd={(e) => finishCrosshairDrag(e, "centre")}
+                onMouseEnter={() => setCursor("move")}
+                onMouseLeave={() => setCursor("default")}
+              />
+            </Group>
+          )}
+
+          {roi && roiType === "Rectangle" && (
+            <Transformer
+              ref={(node: Konva.Transformer | null) => { trRef.current = node; }}
+              rotateEnabled
+              keepRatio={false}
+              borderStroke="#22d3ee"
+              borderStrokeWidth={1}
+              anchorStroke="#22d3ee"
+              anchorFill="#0e7490"
+              anchorSize={8}
+              anchorCornerRadius={2}
+            />
+          )}
+          {roi && (roiType === "Circle" || roiType === "Ring") && (
+            <Transformer
+              ref={(node: Konva.Transformer | null) => { trRef.current = node; }}
+              rotateEnabled={false}
+              keepRatio={roiType === "Circle"}
+              borderStroke="#22d3ee"
+              borderStrokeWidth={1}
+              anchorStroke="#22d3ee"
+              anchorFill="#0e7490"
+              anchorSize={8}
+              anchorCornerRadius={2}
+            />
           )}
         </Layer>
       </Stage>

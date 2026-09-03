@@ -92,6 +92,58 @@ def build_roi_mask(shape, roi_type, x, y, w, h,
     return mask
 
 
+HISTOGRAM_BINS = 64
+
+
+def compute_dose_histogram(values, bins=HISTOGRAM_BINS):
+    """
+    Fixed-bin histogram of the finite entries of *values*.
+
+    The window is the data range itself, so every value lands in a bin. A
+    constant input is padded by half a unit on each side so its single bar
+    sits in the middle of the chart instead of producing a zero-width window.
+
+    Returns
+    -------
+    dict
+        ``bins``, ``value_min``, ``value_max``, ``bin_width``, ``counts``
+        (a list of *bins* ints) and ``total_count``. Every number is finite
+        and JSON-safe.
+    """
+    bins = int(bins)
+    if bins < 1:
+        raise ValueError("bins must be >= 1")
+
+    arr = np.asarray(values, dtype=float).ravel()
+    arr = arr[np.isfinite(arr)]
+    if arr.size == 0:
+        return {
+            "bins": bins,
+            "value_min": 0.0,
+            "value_max": 0.0,
+            "bin_width": 0.0,
+            "counts": [0] * bins,
+            "total_count": 0,
+        }
+
+    vmin, vmax = float(arr.min()), float(arr.max())
+    if not vmax > vmin:
+        vmin, vmax = vmin - 0.5, vmax + 0.5
+
+    idx = ((arr - vmin) * bins / (vmax - vmin)).astype(np.int64)
+    np.clip(idx, 0, bins - 1, out=idx)
+    counts = np.bincount(idx, minlength=bins)
+
+    return {
+        "bins": bins,
+        "value_min": vmin,
+        "value_max": vmax,
+        "bin_width": (vmax - vmin) / bins,
+        "counts": counts.tolist(),
+        "total_count": int(arr.size),
+    }
+
+
 class FilmAnalyzer:
     """Stateful film analysis engine."""
 
@@ -141,33 +193,44 @@ class FilmAnalyzer:
         self.dose_map = rational_func_calibration(arr, a, b, c)
         return self.dose_map
 
-    def get_roi_stats(self, roi_mask, trim_enabled=False, trim_percent=2.0):
+    def get_roi_stats(self, roi_mask, trim_enabled=False, trim_percent=2.0,
+                      histogram_bins=HISTOGRAM_BINS):
         """
         Compute descriptive statistics for the dose map within the
         given boolean *roi_mask*.
 
         When *trim_enabled* is True, *trim_percent* % of the values are
         removed from each tail (lowest and highest doses) before the
-        statistics are computed. Otherwise all pixels are used.
+        statistics are computed. Otherwise all pixels are used. Non-finite
+        dose values are always ignored.
+
+        The histogram describes *all* masked pixels, before trimming, so a
+        chart can show what the trim excluded; ``trim_low`` / ``trim_high``
+        are the doses of the lowest and highest kept pixel (None when no
+        trimming happened). Pass ``histogram_bins=0`` to skip it.
 
         Returns
         -------
         dict or None
-            Keys: max, min, mean, std, cv, dur, flatness.
+            Keys: max, min, mean, std, cv, dur, flatness, median, p2, p98,
+            homogeneity_index, trimmed_count, trim_low, trim_high, histogram.
         """
         if self.dose_map is None:
             return None
 
-        masked_dose = self.dose_map[roi_mask]
+        masked_dose = np.asarray(self.dose_map[roi_mask], dtype=float).ravel()
+        masked_dose = masked_dose[np.isfinite(masked_dose)]
         if masked_dose.size == 0:
             return None
 
-        sorted_dose = np.sort(masked_dose.flatten())
+        sorted_dose = np.sort(masked_dose)
+        trimming = False
         if trim_enabled and trim_percent > 0:
             frac = min(max(float(trim_percent), 0.0), 49.0) / 100.0
             lo = int(len(sorted_dose) * frac)
             hi = int(len(sorted_dose) * (1.0 - frac))
             trimmed = sorted_dose[lo:hi]
+            trimming = lo > 0
         else:
             trimmed = sorted_dose
 
@@ -191,6 +254,11 @@ class FilmAnalyzer:
             dur = float("inf")
             flatness = float("inf")
 
+        p2, median, p98 = (float(v) for v in np.percentile(trimmed, [2, 50, 98]))
+        # ICRU 83 style homogeneity index: dose spread of the central 96%
+        # relative to the median.
+        homogeneity_index = (p98 - p2) / median if median != 0 else None
+
         return {
             "max": trimmed_max,
             "min": trimmed_min,
@@ -199,4 +267,16 @@ class FilmAnalyzer:
             "cv": cv_dose,
             "dur": dur,
             "flatness": flatness,
+            "median": median,
+            "p2": p2,
+            "p98": p98,
+            "homogeneity_index": homogeneity_index,
+            "trimmed_count": int(trimmed.size),
+            "trim_low": float(trimmed[0]) if trimming else None,
+            "trim_high": float(trimmed[-1]) if trimming else None,
+            "histogram": (
+                compute_dose_histogram(sorted_dose, histogram_bins)
+                if histogram_bins
+                else None
+            ),
         }

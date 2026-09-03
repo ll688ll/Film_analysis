@@ -1,59 +1,88 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
+import { fmt, thousands } from "./format";
+import { IconCopy, toolbarButtonClass } from "./panelIcons";
+import {
+  STAT_ROWS,
+  copyText,
+  optionsCaption,
+  statsToTSV,
+  type ExportMeta,
+} from "./roiExport";
+import type { ROIStats } from "./roiTypes";
 
-export interface ROIStats {
-  max: number;
-  min: number;
-  mean: number;
-  std: number;
-  cv: number;
-  dur: number;
-  flatness: number;
-  center_x_mm: number;
-  center_y_mm: number;
-  width_mm: number;
-  height_mm: number;
-  area_mm2: number;
-  trim_enabled?: boolean;
-  trim_percent?: number;
-  corner_cut_mm?: number;
-}
+export type { ROIStats } from "./roiTypes";
 
 interface StatsPanelProps {
   stats: ROIStats | null;
   loading: boolean;
+  /** The panel shows the error itself; this only suppresses the empty-state hint. */
+  hasError?: boolean;
+  exportMeta: ExportMeta;
 }
 
-function fmt(v: number | undefined | null, decimals = 3): string {
-  if (v == null || !isFinite(v)) return "—";
-  return v.toFixed(decimals);
-}
+/** The full statistics table with a copy-as-TSV action. */
+export default function StatsPanel({
+  stats,
+  loading,
+  hasError = false,
+  exportMeta,
+}: StatsPanelProps) {
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">("idle");
 
-export default function StatsPanel({ stats, loading }: StatsPanelProps) {
   const rows = useMemo(() => {
     if (!stats) return null;
-    return [
-      { label: "Dose Max", value: `${fmt(stats.max)} Gy` },
-      { label: "Dose Min", value: `${fmt(stats.min)} Gy` },
-      { label: "Dose Mean", value: `${fmt(stats.mean)} Gy` },
-      { label: "Dose Std", value: `${fmt(stats.std)} Gy` },
-      { label: "CV", value: `${fmt(stats.cv, 2)} %` },
-      { label: "DUR", value: fmt(stats.dur, 4) },
-      { label: "Flatness", value: `${fmt(stats.flatness, 2)} %` },
-      { label: "Center X", value: `${fmt(stats.center_x_mm, 2)} mm` },
-      { label: "Center Y", value: `${fmt(stats.center_y_mm, 2)} mm` },
-      { label: "Width", value: `${fmt(stats.width_mm, 2)} mm` },
-      { label: "Height", value: `${fmt(stats.height_mm, 2)} mm` },
-      { label: "Area", value: `${fmt(stats.area_mm2, 2)} mm\u00B2` },
-    ];
+    return STAT_ROWS.map((row) => {
+      const raw = stats[row.key];
+      const num = typeof raw === "number" ? raw : null;
+      let value: string;
+      if (row.key === "pixel_count") {
+        value = thousands(num);
+        if (
+          stats.trimmed_count != null &&
+          num != null &&
+          stats.trimmed_count !== num
+        ) {
+          value += ` (${thousands(stats.trimmed_count)} kept)`;
+        }
+      } else {
+        value = fmt(num, row.decimals);
+      }
+      return { label: row.label, value, unit: row.unit };
+    });
   }, [stats]);
+
+  const handleCopy = async () => {
+    if (!stats) return;
+    const ok = await copyText(statsToTSV(stats, exportMeta));
+    setCopyState(ok ? "copied" : "failed");
+    window.setTimeout(() => setCopyState("idle"), 1500);
+  };
+
+  const caption = optionsCaption(stats);
 
   return (
     <div className="p-4">
-      <h2 className="text-xs font-semibold text-slate-400 uppercase tracking-wider mb-3">
-        Statistics
-      </h2>
+      <div className="flex items-center justify-between gap-2 mb-2">
+        <span className="text-xs text-slate-500 truncate">
+          {caption ?? (stats ? "All pixels in the ROI" : "")}
+        </span>
+        <button
+          type="button"
+          onClick={handleCopy}
+          disabled={!stats}
+          title="Copy the table as tab-separated text"
+          className={toolbarButtonClass}
+        >
+          <IconCopy size={14} />
+          {copyState === "copied"
+            ? "Copied"
+            : copyState === "failed"
+              ? "Copy failed"
+              : "Copy TSV"}
+        </button>
+      </div>
 
-      {loading && (
+      {loading && !stats && (
         <div className="flex items-center justify-center py-6">
           <svg
             className="animate-spin h-5 w-5 text-sky-400"
@@ -79,14 +108,18 @@ export default function StatsPanel({ stats, loading }: StatsPanelProps) {
         </div>
       )}
 
-      {!loading && !stats && (
+      {!loading && !stats && !hasError && (
         <p className="text-sm text-slate-500">
           Draw an ROI on the dose map to view statistics.
         </p>
       )}
 
-      {!loading && rows && (
-        <div className="rounded-lg bg-slate-800/50 border border-slate-600 overflow-hidden">
+      {rows && (
+        <div
+          className={`rounded-lg bg-slate-800/50 border border-slate-600 overflow-hidden transition-opacity ${
+            loading ? "opacity-50" : ""
+          }`}
+        >
           <table className="w-full text-sm">
             <tbody>
               {rows.map((row, i) => (
@@ -97,29 +130,17 @@ export default function StatsPanel({ stats, loading }: StatsPanelProps) {
                   <td className="px-3 py-1.5 text-slate-400 font-medium">
                     {row.label}
                   </td>
-                  <td className="px-3 py-1.5 text-slate-200 text-right font-mono">
+                  <td className="px-3 py-1.5 text-slate-200 text-right font-mono whitespace-nowrap">
                     {row.value}
+                    {row.unit && (
+                      <span className="ml-1 text-slate-500">{row.unit}</span>
+                    )}
                   </td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
-      )}
-
-      {!loading && stats && (stats.trim_enabled || (stats.corner_cut_mm ?? 0) > 0) && (
-        <p className="mt-2 text-xs text-slate-500">
-          {[
-            stats.trim_enabled
-              ? `Trimmed ${stats.trim_percent}% per tail`
-              : null,
-            (stats.corner_cut_mm ?? 0) > 0
-              ? `Corners removed: ${stats.corner_cut_mm} mm`
-              : null,
-          ]
-            .filter(Boolean)
-            .join(" · ")}
-        </p>
       )}
     </div>
   );

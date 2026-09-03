@@ -5,6 +5,8 @@ import io
 import pytest
 from httpx import AsyncClient
 
+from app.main import app
+
 pytestmark = pytest.mark.asyncio
 
 
@@ -223,6 +225,116 @@ async def test_roi_circle(auth_client: AsyncClient, test_film_path: str):
     data = resp.json()
     assert data["pixel_count"] > 0
     assert data["roi_type"] == "Circle"
+
+
+async def test_roi_response_has_histogram_and_percentiles(
+    auth_client: AsyncClient, test_film_path: str
+):
+    upload_data = await _upload_film(auth_client, test_film_path)
+    session_id = upload_data["session_id"]
+    await _calibrate(auth_client, session_id)
+
+    resp = await auth_client.post(
+        f"/api/analysis/{session_id}/roi",
+        json={"roi_type": "Rectangle", "x": 10, "y": 10, "w": 50, "h": 50},
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+
+    hist = data["histogram"]
+    assert hist["bins"] == 64
+    assert len(hist["counts"]) == 64
+    assert sum(hist["counts"]) == hist["total_count"] == data["pixel_count"]
+    assert hist["value_min"] <= data["min"]
+    assert hist["value_max"] >= data["max"]
+    assert hist["bin_width"] > 0
+
+    assert data["p2"] <= data["median"] <= data["p98"]
+    assert data["homogeneity_index"] >= 0
+    assert data["trimmed_count"] == data["pixel_count"]
+    assert data["trim_low"] is None
+    assert data["trim_high"] is None
+
+
+async def test_roi_histogram_is_untrimmed(
+    auth_client: AsyncClient, test_film_path: str
+):
+    upload_data = await _upload_film(auth_client, test_film_path)
+    session_id = upload_data["session_id"]
+    await _calibrate(auth_client, session_id)
+
+    roi = {"roi_type": "Rectangle", "x": 10, "y": 10, "w": 50, "h": 50}
+    all_data = (
+        await auth_client.post(f"/api/analysis/{session_id}/roi", json=roi)
+    ).json()
+    trim_data = (
+        await auth_client.post(
+            f"/api/analysis/{session_id}/roi",
+            json={**roi, "trim_enabled": True, "trim_percent": 5},
+        )
+    ).json()
+
+    assert trim_data["histogram"]["counts"] == all_data["histogram"]["counts"]
+    assert trim_data["histogram"]["total_count"] == all_data["pixel_count"]
+    assert trim_data["trimmed_count"] < all_data["trimmed_count"]
+    assert trim_data["trim_low"] == trim_data["min"]
+    assert trim_data["trim_high"] == trim_data["max"]
+    assert all_data["histogram"]["value_min"] <= trim_data["trim_low"]
+    assert trim_data["trim_high"] <= all_data["histogram"]["value_max"]
+
+
+async def test_roi_zero_minimum_is_json_safe(
+    auth_client: AsyncClient, test_film_path: str
+):
+    """dur/flatness are inf when the ROI minimum is 0; JSON cannot carry inf."""
+    upload_data = await _upload_film(auth_client, test_film_path)
+    session_id = upload_data["session_id"]
+    await _calibrate(auth_client, session_id)
+
+    entry = app.state.image_cache[session_id]
+    dose_map = entry["dose_map"].copy()
+    dose_map[5:30, 5:30] = 0.0
+    entry["dose_map"] = dose_map
+
+    resp = await auth_client.post(
+        f"/api/analysis/{session_id}/roi",
+        json={"roi_type": "Rectangle", "x": 10, "y": 10, "w": 10, "h": 10},
+    )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["max"] == 0.0
+    assert data["cv"] is None
+    assert data["dur"] is None
+    assert data["flatness"] is None
+    assert data["homogeneity_index"] is None
+
+
+async def test_save_accepts_extended_roi_stats(
+    auth_client: AsyncClient, test_film_path: str
+):
+    """The client posts the whole /roi response back on save; extras are ignored."""
+    upload_data = await _upload_film(auth_client, test_film_path)
+    session_id = upload_data["session_id"]
+    await _calibrate(auth_client, session_id)
+
+    roi = {"roi_type": "Rectangle", "x": 10, "y": 10, "w": 50, "h": 50}
+    stats = (
+        await auth_client.post(f"/api/analysis/{session_id}/roi", json=roi)
+    ).json()
+    assert "histogram" in stats
+
+    resp = await auth_client.post(
+        f"/api/analysis/{session_id}/save",
+        json={"channel": "Red", "a": 0.3, "b": 1.0, "c": -1.0,
+              "roi": roi, "stats": stats},
+    )
+    assert resp.status_code == 200, resp.text
+
+    detail = (
+        await auth_client.get(f"/api/analysis/saved/{resp.json()['id']}")
+    ).json()
+    assert detail["stats"]["mean"] == pytest.approx(stats["mean"])
+    assert detail["stats"]["pixel_count"] == stats["pixel_count"]
 
 
 async def test_roi_trim_narrows_range(auth_client: AsyncClient, test_film_path: str):

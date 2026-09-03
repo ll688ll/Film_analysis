@@ -9,7 +9,8 @@ Originally built as a desktop tkinter application (`main.py`), now extended with
 - **User management** — Register/login with JWT authentication; all data is isolated per user account
 - **Calibration wizard** — Upload calibration film scans, select ROI regions at known dose levels, fit rational function curves (Red/Green/Blue channels), and save reusable calibration profiles
 - **Film analysis** — Upload irradiated film scans, apply a calibration profile to generate dose maps, interactively explore dose values with cursor readout
-- **ROI tools** — Rectangle, Circle, and Ring ROI shapes with drag, resize, and rotation; computes dose statistics (mean, min, max, std, CV, DUR, flatness) with physical dimensions (mm)
+- **ROI tools** — Rectangle, Circle, and Ring ROI shapes with drag, resize, and rotation; pixel selection by trimming, corner removal, and dose threshold
+- **ROI analysis panel** — A foldable right-hand panel with summary tiles and four views: **Stats** (mean, min, max, std, CV, DUR, flatness, median, P2/P98, homogeneity index, pixel count, physical dimensions in mm; copy as TSV), **Histogram** (all ROI pixels, with trim cutoffs and mean/median markers; CSV), **Contour** (isodose bands and labelled lines in % of the ROI maximum or in Gy, optionally overlaid on the dose map), and **Profiles** (dose profiles through the ROI centre with FWHM and 80–20 % penumbra; CSV)
 - **Interactive dose map** — Client-side Canvas rendering with selectable colormaps (jet, viridis, hot), adjustable dose range, and real-time cursor dose readout
 - **Analysis history** — Saved analyses keep the original film scan, an immutable snapshot of the calibration profile that produced them, the ROI geometry, and the computed statistics
 - **Project folders** — Group saved analyses into per-user projects; move them between projects or leave them unfiled
@@ -46,7 +47,7 @@ Where `Color% = pixel_value / 255.0` (0–1 range). Curves are fitted independen
 - React 18 + React Router + Vite
 - Tailwind CSS for styling
 - react-konva for canvas-based image display and ROI interaction
-- Plotly.js for calibration curve charts
+- Plotly.js for calibration curves and the ROI histogram, contour, and profile charts
 - Client-side dose map rendering with Canvas API
 - Axios with JWT interceptor
 
@@ -97,7 +98,8 @@ Film_analysis/
 │   └── test_wizard.py         # Wizard endpoint tests
 │
 ├── docs/
-│   └── analysis-history-design.md  # Design of the saved-analysis feature
+│   ├── analysis-history-design.md  # Design of the saved-analysis feature
+│   └── roi-analysis-panel-design.md # Design of the ROI analysis panel
 │
 ├── frontend/
 │   ├── Dockerfile
@@ -112,8 +114,19 @@ Film_analysis/
 │       │   ├── AnalysisPage.tsx
 │       │   ├── ImageCanvas.tsx
 │       │   ├── CalibrationPanel.tsx
-│       │   ├── StatsPanel.tsx
+│       │   ├── RoiPanel.tsx       # Right-hand ROI panel: tools, tiles, views
 │       │   ├── ROIControls.tsx
+│       │   ├── StatsPanel.tsx
+│       │   ├── RoiHistogram.tsx
+│       │   ├── RoiContour.tsx
+│       │   ├── RoiProfiles.tsx
+│       │   ├── roiGeometry.ts     # Client-side mirror of build_roi_mask
+│       │   ├── roiCrop.ts         # Masked, block-averaged ROI crop
+│       │   ├── marchingSquares.ts # Isolines from a scalar grid
+│       │   ├── isolines.ts        # Contour bands and lines of a crop
+│       │   ├── contourLevels.ts
+│       │   ├── profileMetrics.ts  # Profiles, FWHM, penumbra
+│       │   ├── roiExport.ts       # Copy / CSV
 │       │   ├── colormaps.ts
 │       │   └── useDoseMap.ts
 │       ├── wizard/            # Calibration wizard page
@@ -121,7 +134,7 @@ Film_analysis/
 │       │   ├── WizardCanvas.tsx
 │       │   └── CurveChart.tsx
 │       ├── history/           # Analysis history page
-│       └── components/        # Layout, ProtectedRoute, ProtectedTabs
+│       └── components/        # Layout, ProtectedRoute, ProtectedTabs, SidePanel
 │
 └── test/
     └── CAL_007.tif            # Sample calibration film scan
@@ -236,7 +249,7 @@ Working-session endpoints take the in-memory cache UUID returned by `/upload`:
 | POST | `/api/analysis/{id}/calibrate` | Apply calibration, generate dose map |
 | GET | `/api/analysis/{id}/dose-preview` | Get dose map as PNG image |
 | GET | `/api/analysis/{id}/dose-data` | Get dose map as binary Float32 array |
-| POST | `/api/analysis/{id}/roi` | Compute ROI statistics |
+| POST | `/api/analysis/{id}/roi` | Compute ROI statistics, percentiles, and a 64-bin dose histogram |
 | POST | `/api/analysis/{id}/save` | Save the analysis, or overwrite an existing one |
 
 ### Saved Analyses
