@@ -10,12 +10,14 @@ from pathlib import Path
 
 import numpy as np
 from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, status
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.config import settings
 from app.database import get_db
 from app.dependencies import get_current_user
 from app.models import (
@@ -405,11 +407,20 @@ async def upload_image(
     current_user: User = Depends(get_current_user),
 ):
     session_id, save_path = await save_upload(
-        file, current_user.id, ALLOWED_EXTENSIONS
+        file, current_user.id, ALLOWED_EXTENSIONS,
+        max_mb=settings.MAX_FILM_UPLOAD_SIZE_MB,
     )
 
-    # Load image into memory
-    image_array, dpi, _w, _h, _ch = load_image(str(save_path))
+    # Decoding a large scan takes seconds; keep the event loop free.
+    try:
+        image_array, dpi, _w, _h, _ch = await run_in_threadpool(
+            load_image, str(save_path)
+        )
+    except ValueError as exc:
+        save_path.unlink(missing_ok=True)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+        ) from exc
     _dpi, has_dpi = read_dpi(str(save_path))
 
     h, w = image_array.shape[:2]
@@ -450,7 +461,7 @@ async def preview_image(
     current_user: User = Depends(get_current_user),
 ):
     entry = _get_cache_entry(request, session_id, current_user.id)
-    jpeg_bytes = generate_preview(entry["image_array"])
+    jpeg_bytes = await run_in_threadpool(generate_preview, entry["image_array"])
     return Response(content=jpeg_bytes, media_type="image/jpeg")
 
 
@@ -463,19 +474,13 @@ async def calibrate(
 ):
     entry = _get_cache_entry(request, session_id, current_user.id)
 
-    analyzer = FilmAnalyzer()
-    analyzer.image_array = entry["image_array"]
-    analyzer.dpi = entry["dpi"]
-
-    dose_map = analyzer.calculate_dose_map(body.channel, body.a, body.b, body.c)
+    dose_map, dose_min, dose_max, dose_mean = await run_in_threadpool(
+        _compute_dose_map, entry["image_array"], body
+    )
 
     # Clip dose map if bounds provided
-    if body.cmap_min is not None or body.cmap_max is not None:
-        low = body.cmap_min if body.cmap_min is not None else float(np.nanmin(dose_map))
-        high = body.cmap_max if body.cmap_max is not None else float(np.nanmax(dose_map))
-    else:
-        low = float(np.nanmin(dose_map))
-        high = float(np.nanmax(dose_map))
+    low = body.cmap_min if body.cmap_min is not None else dose_min
+    high = body.cmap_max if body.cmap_max is not None else dose_max
 
     entry["dose_map"] = dose_map
     entry["cmap_min"] = low
@@ -483,10 +488,25 @@ async def calibrate(
 
     return {
         "session_id": session_id,
-        "dose_min": float(np.nanmin(dose_map)),
-        "dose_max": float(np.nanmax(dose_map)),
-        "dose_mean": float(np.nanmean(dose_map)),
+        "dose_min": dose_min,
+        "dose_max": dose_max,
+        "dose_mean": dose_mean,
     }
+
+
+def _compute_dose_map(
+    image_array: np.ndarray, body: CalibrateRequest
+) -> tuple[np.ndarray, float, float, float]:
+    """Dose map plus its min/max/mean, computed off the event loop."""
+    analyzer = FilmAnalyzer()
+    analyzer.image_array = image_array
+    dose_map = analyzer.calculate_dose_map(body.channel, body.a, body.b, body.c)
+    return (
+        dose_map,
+        float(np.nanmin(dose_map)),
+        float(np.nanmax(dose_map)),
+        float(np.nanmean(dose_map)),
+    )
 
 
 @router.get("/{session_id}/dose-preview")
@@ -524,18 +544,9 @@ async def dose_data(
             detail="Calibration has not been applied yet",
         )
 
-    dose_map: np.ndarray = entry["dose_map"]
-
-    # Replace NaN with 0
-    clean = np.where(np.isnan(dose_map), 0.0, dose_map).astype(np.float32)
-
-    # Ensure C-contiguous layout
-    if not clean.flags["C_CONTIGUOUS"]:
-        clean = np.ascontiguousarray(clean)
-
-    height, width = clean.shape[:2]
-    dose_min = float(clean.min())
-    dose_max = float(clean.max())
+    body, (height, width), dose_min, dose_max = await run_in_threadpool(
+        _dose_map_bytes, entry["dose_map"]
+    )
     cmap_min = entry.get("cmap_min", 0)
     cmap_max = entry.get("cmap_max", 40)
 
@@ -554,10 +565,25 @@ async def dose_data(
     # float data ends a chunk, so a 4 MB map became ~16k HTTP chunks and took
     # over 30 s to arrive.
     return Response(
-        content=clean.tobytes(),
+        content=body,
         media_type="application/octet-stream",
         headers=custom_headers,
     )
+
+
+def _dose_map_bytes(
+    dose_map: np.ndarray,
+) -> tuple[bytes, tuple[int, int], float, float]:
+    """Float32 little-endian bytes of *dose_map* with NaN as 0, plus shape and range."""
+    # Replace NaN with 0
+    clean = np.nan_to_num(dose_map, nan=0.0).astype(np.float32, copy=False)
+
+    # Ensure C-contiguous layout
+    if not clean.flags["C_CONTIGUOUS"]:
+        clean = np.ascontiguousarray(clean)
+
+    height, width = clean.shape[:2]
+    return clean.tobytes(), (height, width), float(clean.min()), float(clean.max())
 
 
 @router.post("/{session_id}/roi")
@@ -585,26 +611,8 @@ async def compute_roi(
     ):
         corner_cut_px = body.corner_cut_mm * dpi / 25.4
 
-    mask = build_roi_mask(
-        shape=dose_map.shape,
-        roi_type=body.roi_type,
-        x=body.x,
-        y=body.y,
-        w=body.w,
-        h=body.h,
-        rotation_deg=body.rotation_deg,
-        hole_ratio=body.hole_ratio,
-        threshold=body.threshold,
-        dose_map=dose_map,
-        corner_cut_px=corner_cut_px,
-    )
-
-    analyzer = FilmAnalyzer()
-    analyzer.dose_map = dose_map
-    stats = analyzer.get_roi_stats(
-        mask,
-        trim_enabled=body.trim_enabled,
-        trim_percent=body.trim_percent,
+    stats, pixel_count = await run_in_threadpool(
+        _roi_stats, dose_map, body, corner_cut_px
     )
 
     if stats is None:
@@ -615,7 +623,6 @@ async def compute_roi(
 
     # Compute physical dimensions
     mm_per_px = 25.4 / dpi if dpi > 0 else 0
-    pixel_count = int(np.sum(mask))
     area_mm2 = pixel_count * (mm_per_px ** 2)
 
     center_x_mm = (body.x + body.w / 2) * mm_per_px
@@ -644,6 +651,34 @@ async def compute_roi(
         stats[key] = _finite(stats.get(key))
 
     return stats
+
+
+def _roi_stats(
+    dose_map: np.ndarray, body: ROIRequest, corner_cut_px: float
+) -> tuple[dict | None, int]:
+    """Mask the dose map and summarise it, off the event loop."""
+    mask = build_roi_mask(
+        shape=dose_map.shape,
+        roi_type=body.roi_type,
+        x=body.x,
+        y=body.y,
+        w=body.w,
+        h=body.h,
+        rotation_deg=body.rotation_deg,
+        hole_ratio=body.hole_ratio,
+        threshold=body.threshold,
+        dose_map=dose_map,
+        corner_cut_px=corner_cut_px,
+    )
+
+    analyzer = FilmAnalyzer()
+    analyzer.dose_map = dose_map
+    stats = analyzer.get_roi_stats(
+        mask,
+        trim_enabled=body.trim_enabled,
+        trim_percent=body.trim_percent,
+    )
+    return stats, int(np.sum(mask))
 
 
 @router.post("/{session_id}/save")
@@ -810,7 +845,9 @@ async def open_saved_analysis(
         )
 
     try:
-        image_array, file_dpi, _w, _h, _ch = load_image(str(path))
+        image_array, file_dpi, _w, _h, _ch = await run_in_threadpool(
+            load_image, str(path)
+        )
     except Exception:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,

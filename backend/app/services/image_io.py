@@ -15,6 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 import numpy as np
+import tifffile
 from PIL import Image, ImageOps, UnidentifiedImageError
 
 # Modes that must be converted before the array is meaningful.
@@ -24,6 +25,7 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 #   YCbCr / LAB / HSV -> not RGB despite having three channels
 # Metadata tags used to tell a declared resolution from a Pillow default.
 _JFIF_UNIT_NONE = 0
+_TIFF_BITS_PER_SAMPLE = 258
 _TIFF_X_RESOLUTION = 282
 _TIFF_RESOLUTION_UNIT = 296
 _TIFF_UNIT_NONE = 1
@@ -140,6 +142,35 @@ def _split_alpha(array: np.ndarray, mode: str) -> np.ndarray | None:
     return None
 
 
+def pillow_truncates(img: Image.Image) -> bool:
+    """
+    True when Pillow would keep only 8 of the bits each sample of *img* holds.
+
+    Pillow has no 16-bit RGB mode, so a 48-bit RGB(A) TIFF -- the normal
+    output of a flatbed film scanner -- opens as mode ``RGB`` and decodes to
+    the high byte of every sample, with no warning. 16-bit grayscale opens as
+    ``I;16`` and is unaffected.
+    """
+    if img.format != "TIFF" or img.mode not in ("RGB", "RGBA"):
+        return False
+    tags = getattr(img, "tag_v2", None) or {}
+    return max(tags.get(_TIFF_BITS_PER_SAMPLE, (8,))) > 8
+
+
+def read_tiff_full_depth(filepath: str) -> np.ndarray:
+    """
+    Decode the first page of a TIFF at its native bit depth via ``tifffile``.
+
+    Returns a C-contiguous (H, W, C) array in native byte order.
+    """
+    array = tifffile.imread(filepath, key=0)
+    # Planar-separate files come back as (C, H, W).
+    if array.ndim == 3 and array.shape[0] in (3, 4) and array.shape[2] not in (3, 4):
+        array = np.moveaxis(array, 0, -1)
+    native = array.dtype.newbyteorder("=")
+    return np.ascontiguousarray(array.astype(native, copy=False))
+
+
 def load_image_general(filepath: str) -> LoadedImage:
     """
     Load *filepath* into a normalised :class:`LoadedImage`.
@@ -152,6 +183,9 @@ def load_image_general(filepath: str) -> LoadedImage:
     ValueError
         If the file cannot be decoded as an image, or is large enough to trip
         Pillow's decompression-bomb guard.
+
+    A 16-bit-per-channel RGB(A) TIFF is read through ``tifffile`` so the
+    array keeps all 16 bits; every other file goes through Pillow.
     """
     try:
         img = Image.open(filepath)
@@ -167,30 +201,40 @@ def load_image_general(filepath: str) -> LoadedImage:
         n_frames = int(getattr(img, "n_frames", 1) or 1)
         dpi, has_dpi = _read_dpi(img)
 
-        if n_frames > 1:
-            img.seek(0)
+        if pillow_truncates(img):
+            # Scanner output: no EXIF orientation, no palette. Mode is RGB(A).
+            mode = img.mode
+            try:
+                array = read_tiff_full_depth(filepath)
+            except (OSError, ValueError, tifffile.TiffFileError) as exc:
+                raise ValueError(f"Could not decode image data: {exc}") from exc
+        else:
+            if n_frames > 1:
+                img.seek(0)
 
-        # Phone photos carry an EXIF orientation tag; without this the image
-        # is displayed and analysed rotated relative to how the user sees it.
-        try:
-            img = ImageOps.exif_transpose(img) or img
-        except (OSError, ValueError, KeyError):
-            pass  # malformed EXIF -- keep the untransposed image
+            # Phone photos carry an EXIF orientation tag; without this the
+            # image is displayed and analysed rotated relative to how the
+            # user sees it.
+            try:
+                img = ImageOps.exif_transpose(img) or img
+            except (OSError, ValueError, KeyError):
+                pass  # malformed EXIF -- keep the untransposed image
 
-        target = _MODE_CONVERSIONS.get(img.mode)
-        if target is not None:
-            # Palette images only carry transparency when the file declares it;
-            # converting an opaque palette to RGBA would fabricate an alpha
-            # channel that is uniformly 255, so prefer RGB in that case.
-            if target == "RGBA" and "transparency" not in img.info:
-                target = "RGB"
-            img = img.convert(target)
+            target = _MODE_CONVERSIONS.get(img.mode)
+            if target is not None:
+                # Palette images only carry transparency when the file
+                # declares it; converting an opaque palette to RGBA would
+                # fabricate an alpha channel that is uniformly 255, so prefer
+                # RGB in that case.
+                if target == "RGBA" and "transparency" not in img.info:
+                    target = "RGB"
+                img = img.convert(target)
 
-        mode = img.mode
-        try:
-            array = np.array(img)
-        except (OSError, ValueError) as exc:
-            raise ValueError(f"Could not decode image data: {exc}") from exc
+            mode = img.mode
+            try:
+                array = np.array(img)
+            except (OSError, ValueError) as exc:
+                raise ValueError(f"Could not decode image data: {exc}") from exc
 
     if array.ndim not in (2, 3):
         raise ValueError(f"Unsupported image shape {array.shape}")

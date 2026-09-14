@@ -424,3 +424,31 @@ async def test_cross_user_session_is_404(auth_client: AsyncClient, client: Async
 
     resp = await client.get(f"/api/imaging/{session_id}/plane", headers=headers)
     assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# 48-bit TIFF
+# ---------------------------------------------------------------------------
+
+
+async def test_upload_48bit_tiff_keeps_16_bits(
+    auth_client: AsyncClient, test_film_path: str
+):
+    with open(test_film_path, "rb") as f:
+        resp = await auth_client.post(
+            "/api/imaging/upload",
+            files={"file": ("CAL_007.tif", f, "image/tiff")},
+        )
+    assert resp.status_code == 200, resp.text
+    data = resp.json()
+    assert data["dtype"] == "uint16"
+    assert data["max_possible"] == 65535
+    assert data["channels"] == 3
+    assert data["has_alpha"] is False
+
+    # The histogram window follows the 16-bit data, not an 8-bit view of it.
+    analyze = await auth_client.post(
+        f"/api/imaging/{data['session_id']}/analyze", json={"source": "Red"}
+    )
+    assert analyze.status_code == 200
+    assert analyze.json()["value_max"] > 255

@@ -113,4 +113,21 @@ export async function getMe(): Promise<User> {
   return response.data;
 }
 
+/**
+ * Message for a failed upload. The backend's own 413 carries a JSON detail
+ * naming the limit; one from nginx (client_max_body_size) is an HTML page
+ * with no detail, which used to surface as a generic "Upload failed".
+ */
+export function uploadErrorMessage(err: unknown, fallback: string): string {
+  const e = err as {
+    response?: { status?: number; data?: { detail?: unknown } };
+  };
+  const detail = e?.response?.data?.detail;
+  if (typeof detail === "string") return detail;
+  if (e?.response?.status === 413) {
+    return "This file is larger than the server's upload limit.";
+  }
+  return fallback;
+}
+
 export default client;
