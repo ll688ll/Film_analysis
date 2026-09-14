@@ -1,23 +1,45 @@
 """Film analysis computation logic extracted from the desktop application."""
 
 import numpy as np
-from PIL import Image
 
 
-def rational_func_calibration(pixel_val, a, b, c):
+def pixel_full_scale(image_array) -> float:
+    """
+    Value of a fully saturated pixel in *image_array*: 255 for 8-bit data,
+    65535 for the 16-bit-per-channel output of a film scanner. Float input is
+    taken to be a 0-1 colour fraction already.
+    """
+    dt = np.asarray(image_array).dtype
+    if dt == np.uint8:
+        return 255.0
+    if np.issubdtype(dt, np.integer):
+        return 65535.0
+    return 1.0
+
+
+def rational_func_calibration(pixel_val, a, b, c, scale=None):
     """
     Calculates dose from pixel value using the rational function:
     Dose = b / (color_percentage - a) + c
-    where color_percentage = pixel_val / 255.0
+    where color_percentage = pixel_val / scale
+
+    *scale* defaults to :func:`pixel_full_scale` of the input, so 8-bit and
+    16-bit scans of the same film give the same dose. The map is float32 and
+    built mostly in place: ~9 bytes per pixel of temporaries instead of the
+    ~40 that float64 intermediates cost on a 45 MP scan.
     """
-    color_percentage = pixel_val.astype(float) / 255.0
-    denominator = color_percentage - a
-    term1 = np.divide(
-        b, denominator,
-        out=np.zeros_like(denominator),
-        where=denominator != 0,
-    )
-    return term1 + c
+    arr = np.asarray(pixel_val)
+    if scale is None:
+        scale = pixel_full_scale(arr)
+
+    denominator = arr.astype(np.float32)
+    denominator /= np.float32(scale)
+    denominator -= np.float32(a)
+
+    dose = np.zeros_like(denominator)
+    np.divide(np.float32(b), denominator, out=dose, where=denominator != 0)
+    dose += np.float32(c)
+    return dose
 
 
 def build_roi_mask(shape, roi_type, x, y, w, h,
@@ -154,10 +176,10 @@ class FilmAnalyzer:
 
     def load_image(self, filepath):
         """Load an image file and store the pixel array."""
-        img = Image.open(filepath)
-        self.image_array = np.array(img)
-        if "dpi" in img.info:
-            self.dpi = img.info["dpi"][0]
+        # Deferred: image_utils pulls in matplotlib.
+        from app.services.image_utils import load_image
+
+        self.image_array, self.dpi, _w, _h, _ch = load_image(filepath)
         return self.image_array
 
     def calculate_dose_map(self, channel, a, b, c):
@@ -176,21 +198,25 @@ class FilmAnalyzer:
         Returns
         -------
         np.ndarray
-            2-D dose map.
+            2-D float32 dose map.
         """
         if self.image_array is None:
             raise ValueError("No image loaded")
 
-        if self.image_array.ndim == 2:
-            arr = self.image_array.astype(float)
+        image = self.image_array
+        # Taken from the source array: the channel mean below is float.
+        scale = pixel_full_scale(image)
+
+        if image.ndim == 2:
+            plane = image
         else:
             channel_index = {"Red": 0, "Green": 1, "Blue": 2}
             if channel in channel_index:
-                arr = self.image_array[:, :, channel_index[channel]].astype(float)
+                plane = image[:, :, channel_index[channel]]
             else:
-                arr = np.mean(self.image_array, axis=2).astype(float)
+                plane = np.mean(image, axis=2, dtype=np.float32)
 
-        self.dose_map = rational_func_calibration(arr, a, b, c)
+        self.dose_map = rational_func_calibration(plane, a, b, c, scale=scale)
         return self.dose_map
 
     def get_roi_stats(self, roi_mask, trim_enabled=False, trim_percent=2.0,

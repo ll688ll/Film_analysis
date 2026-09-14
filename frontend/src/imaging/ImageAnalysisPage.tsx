@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import client from "../api/client";
+import client, { uploadErrorMessage } from "../api/client";
 import {
   getSharedSession,
   setSharedSession,
@@ -189,7 +189,7 @@ export default function ImageAnalysisPage({ visible = true }: ImageAnalysisPageP
           source: "imaging",
         });
       } catch (err: any) {
-        setUploadError(err.response?.data?.detail || "Upload failed");
+        setUploadError(uploadErrorMessage(err, "Upload failed"));
       } finally {
         setUploading(false);
       }

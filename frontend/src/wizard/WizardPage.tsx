@@ -1,5 +1,5 @@
 import { useState, useCallback } from "react";
-import client from "../api/client";
+import client, { uploadErrorMessage } from "../api/client";
 import WizardCanvas from "./WizardCanvas";
 import CurveChart from "./CurveChart";
 
@@ -32,6 +32,8 @@ export default function WizardPage() {
   // Image state
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [imageUrl, setImageUrl] = useState<string | null>(null);
+  // Full-resolution size the ROI is measured in; the preview may be smaller.
+  const [imageSize, setImageSize] = useState<{ width: number; height: number } | null>(null);
   const [currentFilename, setCurrentFilename] = useState<string | null>(null);
 
   // ROI
@@ -74,6 +76,7 @@ export default function WizardPage() {
         headers: { "Content-Type": "multipart/form-data" },
       });
       setSessionId(res.data.wizard_session_id);
+      setImageSize({ width: res.data.width, height: res.data.height });
       setCurrentFilename(file.name);
 
       // Fetch preview as blob via authenticated client
@@ -84,7 +87,7 @@ export default function WizardPage() {
       const blobUrl = URL.createObjectURL(previewRes.data);
       setImageUrl(blobUrl);
     } catch (err: any) {
-      setError(err.response?.data?.detail || "Failed to upload image.");
+      setError(uploadErrorMessage(err, "Failed to upload image."));
     } finally {
       setLoading(false);
     }
@@ -428,7 +431,11 @@ export default function WizardPage() {
       <div className="flex-1 flex flex-col min-w-0">
         {/* Canvas */}
         <div className="flex-1 p-3 min-h-0">
-          <WizardCanvas imageUrl={imageUrl} onROIChange={handleROIChange} />
+          <WizardCanvas
+            imageUrl={imageUrl}
+            imageSize={imageSize}
+            onROIChange={handleROIChange}
+          />
         </div>
         {/* Chart */}
         <div className="flex-1 p-3 pt-0 min-h-0">

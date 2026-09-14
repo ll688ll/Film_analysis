@@ -4,7 +4,9 @@ import io
 
 import pytest
 from httpx import AsyncClient
+from PIL import Image
 
+from app.config import settings
 from app.main import app
 
 pytestmark = pytest.mark.asyncio
@@ -476,3 +478,67 @@ async def test_analysis_history(auth_client: AsyncClient, test_film_path: str):
     assert len(data) >= 1
     assert "id" in data[0]
     assert "original_filename" in data[0]
+
+
+# ---------------------------------------------------------------------------
+# Upload limits
+# ---------------------------------------------------------------------------
+
+
+async def test_upload_over_film_limit_is_413(
+    auth_client: AsyncClient, test_film_path: str, upload_dir, monkeypatch
+):
+    monkeypatch.setattr(settings, "MAX_FILM_UPLOAD_SIZE_MB", 0)
+    with open(test_film_path, "rb") as f:
+        resp = await auth_client.post(
+            "/api/analysis/upload",
+            files={"file": ("CAL_007.tif", f, "image/tiff")},
+        )
+    assert resp.status_code == 413
+    assert "0 MB" in resp.json()["detail"]
+    assert list(upload_dir.rglob("*.tif")) == []
+
+
+async def test_film_limit_is_independent_of_general_limit(
+    auth_client: AsyncClient, test_film_path: str, monkeypatch
+):
+    """The wizard/Image-page limit must not cap film scans."""
+    monkeypatch.setattr(settings, "MAX_UPLOAD_SIZE_MB", 0)
+    data = await _upload_film(auth_client, test_film_path)
+    assert data["width"] > 0
+
+
+async def test_upload_over_pixel_limit_is_400_and_removes_file(
+    auth_client: AsyncClient, test_film_path: str, upload_dir, monkeypatch
+):
+    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 1000)
+    with open(test_film_path, "rb") as f:
+        resp = await auth_client.post(
+            "/api/analysis/upload",
+            files={"file": ("CAL_007.tif", f, "image/tiff")},
+        )
+    assert resp.status_code == 400
+    assert "too large" in resp.json()["detail"]
+    assert list(upload_dir.rglob("*.tif")) == []
+
+
+async def test_upload_undecodable_file_is_400(
+    auth_client: AsyncClient, upload_dir
+):
+    resp = await auth_client.post(
+        "/api/analysis/upload",
+        files={"file": ("junk.tif", io.BytesIO(b"II*\x00garbage"), "image/tiff")},
+    )
+    assert resp.status_code == 400
+    assert list(upload_dir.rglob("*.tif")) == []
+
+
+async def test_dose_data_is_one_float32_per_pixel(
+    auth_client: AsyncClient, test_film_path: str
+):
+    upload = await _upload_film(auth_client, test_film_path)
+    await _calibrate(auth_client, upload["session_id"])
+    resp = await auth_client.get(f"/api/analysis/{upload['session_id']}/dose-data")
+    assert resp.status_code == 200
+    assert len(resp.content) == upload["width"] * upload["height"] * 4
+    assert int(resp.headers["x-width"]) == upload["width"]

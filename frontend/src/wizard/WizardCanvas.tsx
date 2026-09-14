@@ -4,10 +4,17 @@ import Konva from "konva";
 
 interface WizardCanvasProps {
   imageUrl: string | null;
+  /**
+   * Size of the image the backend measures, in pixels. The preview served
+   * for display is capped at 2000 px wide, so for a large scan it is smaller
+   * than this; the ROI must be reported in these coordinates, not preview
+   * ones. Falls back to the preview's own size when not given.
+   */
+  imageSize?: { width: number; height: number } | null;
   onROIChange: (roi: { x: number; y: number; w: number; h: number }) => void;
 }
 
-export default function WizardCanvas({ imageUrl, onROIChange }: WizardCanvasProps) {
+export default function WizardCanvas({ imageUrl, imageSize, onROIChange }: WizardCanvasProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const rectRef = useRef<Konva.Rect>(null);
   const trRef = useRef<Konva.Transformer>(null);
@@ -49,18 +56,23 @@ export default function WizardCanvas({ imageUrl, onROIChange }: WizardCanvasProp
     img.src = imageUrl;
   }, [imageUrl]);
 
+  // Full-resolution dimensions: the stage scale maps these to the
+  // container, so dividing a stage coordinate by it gives a backend pixel.
+  const naturalWidth = imageSize?.width ?? image?.width ?? 0;
+  const naturalHeight = imageSize?.height ?? image?.height ?? 0;
+
   // Compute scale whenever image or container changes
   useEffect(() => {
-    if (!image) return;
-    const scaleX = containerSize.width / image.width;
-    const scaleY = containerSize.height / image.height;
+    if (!image || naturalWidth === 0 || naturalHeight === 0) return;
+    const scaleX = containerSize.width / naturalWidth;
+    const scaleY = containerSize.height / naturalHeight;
     const s = Math.min(scaleX, scaleY, 1);
     setScale(s);
 
-    const offsetX = (containerSize.width - image.width * s) / 2;
-    const offsetY = (containerSize.height - image.height * s) / 2;
+    const offsetX = (containerSize.width - naturalWidth * s) / 2;
+    const offsetY = (containerSize.height - naturalHeight * s) / 2;
     setImageOffset({ x: offsetX, y: offsetY });
-  }, [image, containerSize]);
+  }, [image, naturalWidth, naturalHeight, containerSize]);
 
   // Attach transformer
   useEffect(() => {
@@ -130,8 +142,8 @@ export default function WizardCanvas({ imageUrl, onROIChange }: WizardCanvasProp
               image={image}
               x={imageOffset.x}
               y={imageOffset.y}
-              width={image.width * scale}
-              height={image.height * scale}
+              width={naturalWidth * scale}
+              height={naturalHeight * scale}
             />
           )}
           {image && (

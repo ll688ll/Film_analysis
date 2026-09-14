@@ -4,6 +4,63 @@ All notable changes to the Film Analysis tool are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.5.0] - 2026-09-14
+
+High-resolution 48-bit film scans.
+
+### Added
+
+- **Film Dose accepts 1200 dpi, 48-bit scans.** Film uploads have their own
+  limit, `MAX_FILM_UPLOAD_SIZE_MB` (default 400, up from the shared 200), and
+  the nginx body limit is raised from 100 MB to match. A 6528 x 6879 px
+  uncompressed 48-bit TIFF (~257 MB) uploads, calibrates and measures.
+- **16-bit scans are read at 16 bits.** Pillow has no 16-bit RGB mode and
+  silently kept only the high byte of every sample in a 48-bit TIFF, so the
+  film and calibration paths were working from 8-bit data. Such files now go
+  through `tifffile`, and dose and colour-percentage calculations scale by
+  the array's real bit depth (65535 rather than 255). At 1200 dpi that is
+  the difference between 176 and ~28,000 distinct red levels in the test
+  film, and per-pixel dose steps of 2.5-8% versus 0.01-0.03%. Existing
+  profiles fitted from 8-bit data stay valid to within the 8-bit rounding
+  (0.035 percentage points on the test film); re-fitting them from the same
+  scans is recommended.
+- **Calibration scans are capped at `CALIBRATION_MAX_DPI`** (default 300).
+  A sheet scanned above it is block-averaged down by an integer factor
+  before use; patch colours are area means, so the fit is unchanged and the
+  session holds a fraction of the memory.
+- **Uploads that are too large are named as such.** A 413 -- from the API
+  or from nginx, whose HTML body carried no message -- now reads "larger
+  than the server's upload limit" instead of "Upload failed".
+
+### Changed
+
+- The dose map is float32 rather than float64, and is built mostly in
+  place: calibrating the scan above peaks at ~0.6 GB of server memory
+  instead of 2.0 GB, and each open film holds about the same memory as an
+  8-bit one did before.
+- Decoding, calibration, preview generation, dose-map serialisation and ROI
+  statistics run in a worker thread. Other requests -- including other
+  users' -- no longer wait the several seconds these take on a large scan.
+- Uploads are copied to disk a megabyte at a time instead of being read
+  into memory first, and the size check refuses the file before copying
+  when the multipart parser already knows the size.
+- Film previews of images wider than 2000 px are block-averaged before the
+  8-bit conversion, so previewing a 45 MP 48-bit scan no longer needs
+  gigabytes of temporaries.
+
+### Fixed
+
+- **The calibration wizard measured the wrong patch on scans wider than
+  2000 px.** The ROI was drawn on the preview, which is capped at 2000 px
+  wide, but sent to the backend as if the preview were full size, so on a
+  6528 px scan the patch was read 3.3x too close to the top-left corner and
+  3.3x too small. The upload response now reports the measured image's
+  dimensions and the canvas maps the ROI into them.
+- A film or calibration image over Pillow's pixel limit answered with a bare
+  500 and left the file on disk; it is now a 400 that names the problem, and
+  the file is removed. A file that is not a decodable image is refused the
+  same way.
+
 ## [1.4.0] - 2026-09-03
 
 Session handling, copyable statistics, and zoom on the Film Dose map.

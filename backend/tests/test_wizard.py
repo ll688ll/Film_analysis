@@ -1,7 +1,12 @@
 """Tests for the calibration wizard endpoints."""
 
+import io
+
 import pytest
 from httpx import AsyncClient
+from PIL import Image
+
+from app.config import settings
 
 pytestmark = pytest.mark.asyncio
 
@@ -245,3 +250,90 @@ async def test_wizard_full_workflow(auth_client: AsyncClient, test_film_path: st
     )
     assert save_resp.status_code == 201
     assert save_resp.json()["name"] == "Workflow Test Profile"
+
+
+# ---------------------------------------------------------------------------
+# Dimensions, DPI cap, rejected images
+# ---------------------------------------------------------------------------
+
+
+async def test_wizard_upload_reports_measured_dimensions(
+    auth_client: AsyncClient, test_film_path: str
+):
+    """The canvas needs the size the ROI is measured in, not the preview's."""
+    data = await _upload_wizard_image(auth_client, test_film_path)
+    assert data["width"] == 1016
+    assert data["height"] == 1016
+    assert data["dpi"] == pytest.approx(254.0)
+    assert data["downsample_factor"] == 1  # 254 dpi is under the 300 cap
+
+
+async def test_wizard_downsamples_scan_above_dpi_cap(
+    auth_client: AsyncClient, test_film_path: str, monkeypatch
+):
+    monkeypatch.setattr(settings, "CALIBRATION_MAX_DPI", 100)
+    data = await _upload_wizard_image(auth_client, test_film_path)
+    assert data["downsample_factor"] == 2  # 254 // 100
+    assert data["width"] == 508 and data["height"] == 508
+    assert data["dpi"] == pytest.approx(127.0)
+
+    # The preview and the measurement both use the reduced image.
+    preview = await auth_client.get(data["preview_url"])
+    assert Image.open(io.BytesIO(preview.content)).size == (508, 508)
+
+    resp = await auth_client.post(
+        "/api/wizard/extract-point",
+        json={"wizard_session_id": data["wizard_session_id"],
+              "x": 200, "y": 200, "w": 40, "h": 40, "dose": 1.0},
+    )
+    assert resp.status_code == 200
+    assert 0.0 < resp.json()["red_pct"] < 1.0
+
+
+async def test_wizard_downsample_preserves_patch_colour(
+    auth_client: AsyncClient, test_film_path: str, monkeypatch
+):
+    """A patch mean measured on the reduced image matches the full one."""
+    full = await _upload_wizard_image(auth_client, test_film_path)
+    full_pct = (await auth_client.post(
+        "/api/wizard/extract-point",
+        json={"wizard_session_id": full["wizard_session_id"],
+              "x": 400, "y": 400, "w": 80, "h": 80, "dose": 1.0},
+    )).json()
+
+    monkeypatch.setattr(settings, "CALIBRATION_MAX_DPI", 100)
+    small = await _upload_wizard_image(auth_client, test_film_path)
+    small_pct = (await auth_client.post(
+        "/api/wizard/extract-point",
+        json={"wizard_session_id": small["wizard_session_id"],
+              "x": 200, "y": 200, "w": 40, "h": 40, "dose": 1.0},
+    )).json()
+
+    for key in ("red_pct", "green_pct", "blue_pct"):
+        assert small_pct[key] == pytest.approx(full_pct[key], abs=1e-4)
+
+
+async def test_wizard_upload_over_pixel_limit_is_400(
+    auth_client: AsyncClient, test_film_path: str, upload_dir, monkeypatch
+):
+    monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 1000)
+    with open(test_film_path, "rb") as f:
+        resp = await auth_client.post(
+            "/api/wizard/upload-image",
+            files={"file": ("CAL_007.tif", f, "image/tiff")},
+        )
+    assert resp.status_code == 400
+    assert "too large" in resp.json()["detail"]
+    assert list(upload_dir.rglob("*.tif")) == []
+
+
+async def test_wizard_uses_general_upload_limit(
+    auth_client: AsyncClient, test_film_path: str, monkeypatch
+):
+    monkeypatch.setattr(settings, "MAX_UPLOAD_SIZE_MB", 0)
+    with open(test_film_path, "rb") as f:
+        resp = await auth_client.post(
+            "/api/wizard/upload-image",
+            files={"file": ("CAL_007.tif", f, "image/tiff")},
+        )
+    assert resp.status_code == 413

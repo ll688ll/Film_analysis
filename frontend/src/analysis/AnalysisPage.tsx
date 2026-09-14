@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
-import client from "../api/client";
+import client, { uploadErrorMessage } from "../api/client";
 import { setSharedSession } from "../api/imageSession";
 import {
   subscribePendingRestore,
@@ -249,9 +249,7 @@ export default function AnalysisPage({ visible = true }: { visible?: boolean }) 
         source: "analysis",
       });
     } catch (err: any) {
-      setUploadError(
-        err.response?.data?.detail || "Upload failed. Please try again."
-      );
+      setUploadError(uploadErrorMessage(err, "Upload failed. Please try again."));
     } finally {
       setUploading(false);
     }

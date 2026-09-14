@@ -15,6 +15,7 @@ from typing import Literal
 
 import numpy as np
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile, status
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
@@ -175,7 +176,7 @@ async def upload_image(
     )
 
     try:
-        loaded = load_image_general(str(save_path))
+        loaded = await run_in_threadpool(load_image_general, str(save_path))
     except ValueError as exc:
         save_path.unlink(missing_ok=True)
         raise HTTPException(

@@ -3,6 +3,8 @@
 import numpy as np
 from scipy.optimize import curve_fit
 
+from app.services.film_analyzer import pixel_full_scale
+
 
 def rational_color_model(dose, a, b, c):
     """Forward model: Color% = a + b / (Dose - c)."""
@@ -28,12 +30,15 @@ def extract_color_percentages(image_array, x, y, w, h):
         Keys: red_pct, green_pct, blue_pct (each 0-1).
     """
     roi = image_array[y : y + h, x : x + w]
-    means = roi.mean(axis=(0, 1))  # per-channel mean (0-255)
-    # Return 0-1 range to match desktop app and rational_func_calibration
+    means = roi.mean(axis=(0, 1))  # per-channel mean, in pixel units
+    # Return 0-1 range to match desktop app and rational_func_calibration.
+    # The divisor follows the bit depth, so a 48-bit scan gives the same
+    # fraction as an 8-bit one of the same film.
+    scale = pixel_full_scale(image_array)
     return {
-        "red_pct": float(means[0] / 255.0),
-        "green_pct": float(means[1] / 255.0),
-        "blue_pct": float(means[2] / 255.0),
+        "red_pct": float(means[0] / scale),
+        "green_pct": float(means[1] / scale),
+        "blue_pct": float(means[2] / scale),
     }
 
 

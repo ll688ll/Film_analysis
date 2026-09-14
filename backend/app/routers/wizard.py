@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, status
+from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.database import get_db
 from app.dependencies import get_current_user
 from app.models import CalibrationPoint, CalibrationProfile, ChannelParams, User
 from app.services.calibration import extract_color_percentages, fit_calibration_curves
-from app.services.image_utils import load_image
+from app.services.image_io import read_dpi
+from app.services.image_utils import block_mean, load_image
 from app.services.session_cache import get_cache_entry, put_cache_entry, save_upload
 
 router = APIRouter(prefix="/wizard", tags=["wizard"])
@@ -79,11 +82,36 @@ async def upload_wizard_image(
     request: Request,
     current_user: User = Depends(get_current_user),
 ):
+    """
+    Open a calibration-film session.
+
+    A scan above ``CALIBRATION_MAX_DPI`` is block-averaged down by the
+    largest integer factor that keeps it at or above the cap (1200 dpi -> 4x
+    -> 300 dpi). Patch colours are area means, so this loses nothing the fit
+    can use, and it keeps a 1200 dpi sheet from holding 16x the memory. The
+    returned ``width``/``height`` are the dimensions ROI coordinates refer to.
+    """
     wizard_session_id, save_path = await save_upload(
         file, current_user.id, ALLOWED_EXTENSIONS, subdir="wizard"
     )
 
-    image_array, dpi, _w, _h, _ch = load_image(str(save_path))
+    try:
+        image_array, dpi, _w, _h, _ch = await run_in_threadpool(
+            load_image, str(save_path)
+        )
+    except ValueError as exc:
+        save_path.unlink(missing_ok=True)
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+        ) from exc
+    _dpi, has_dpi = read_dpi(str(save_path))
+
+    factor = max(1, int(dpi // settings.CALIBRATION_MAX_DPI)) if has_dpi else 1
+    if factor > 1:
+        image_array = await run_in_threadpool(block_mean, image_array, factor)
+        dpi = dpi / factor
+
+    height, width = image_array.shape[:2]
 
     put_cache_entry(
         request,
@@ -92,11 +120,20 @@ async def upload_wizard_image(
         dpi=dpi,
         file_path=str(save_path),
         user_id=current_user.id,
+        has_dpi=has_dpi,
+        original_filename=file.filename or "unknown",
+        width=width,
+        height=height,
+        channels=1 if image_array.ndim == 2 else image_array.shape[2],
     )
 
     return {
         "wizard_session_id": wizard_session_id,
         "preview_url": f"/api/analysis/{wizard_session_id}/preview",
+        "width": width,
+        "height": height,
+        "dpi": dpi,
+        "downsample_factor": factor,
     }
 
 

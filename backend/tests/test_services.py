@@ -625,3 +625,155 @@ class TestDoseHistogram:
     def test_rejects_zero_bins(self):
         with pytest.raises(ValueError):
             compute_dose_histogram(np.array([1.0]), bins=0)
+
+
+# ---------------------------------------------------------------------------
+# 16-bit scans, block averaging, dtype-aware dose scale
+# ---------------------------------------------------------------------------
+
+
+class TestLoadImage16Bit:
+    def test_48bit_tiff_keeps_16_bits(self, test_film_path):
+        """CAL_007.tif is 48-bit; Pillow alone would return its high bytes."""
+        from PIL import Image
+
+        image_array, *_ = load_image(test_film_path)
+        assert image_array.dtype == np.uint16
+        assert int(image_array.max()) > 255
+
+        with Image.open(test_film_path) as img:
+            pillow_view = np.array(img)
+        assert pillow_view.dtype == np.uint8
+        assert np.array_equal(image_array >> 8, pillow_view)
+
+    def test_8bit_stays_uint8(self, tmp_path):
+        from PIL import Image
+
+        path = tmp_path / "8bit.tif"
+        Image.fromarray(np.full((4, 5, 3), 200, np.uint8)).save(path)
+        image_array, _dpi, width, height, channels = load_image(str(path))
+        assert image_array.dtype == np.uint8
+        assert (width, height, channels) == (5, 4, 3)
+
+    def test_rejects_non_image(self, tmp_path):
+        path = tmp_path / "junk.tif"
+        path.write_bytes(b"not a tiff at all")
+        with pytest.raises(ValueError, match="not a recognised image"):
+            load_image(str(path))
+
+    def test_rejects_image_over_pixel_limit(self, test_film_path, monkeypatch):
+        from PIL import Image
+
+        monkeypatch.setattr(Image, "MAX_IMAGE_PIXELS", 1000)
+        with pytest.raises(ValueError, match="too large"):
+            load_image(test_film_path)
+
+
+class TestBlockMean:
+    def test_averages_blocks_and_keeps_dtype(self):
+        from app.services.image_utils import block_mean
+
+        arr = np.zeros((4, 6, 3), np.uint16)
+        arr[:2, :2] = 1000
+        arr[:2, 2:4] = (100, 200, 300)
+        arr[0, 4, 0] = 65535  # one hot pixel in an otherwise zero block
+
+        out = block_mean(arr, 2)
+        assert out.shape == (2, 3, 3)
+        assert out.dtype == np.uint16
+        assert tuple(out[0, 0]) == (1000, 1000, 1000)
+        assert tuple(out[0, 1]) == (100, 200, 300)
+        assert tuple(out[0, 2]) == (round(65535 / 4), 0, 0)
+        assert not out[1].any()
+
+    def test_drops_partial_blocks(self):
+        from app.services.image_utils import block_mean
+
+        arr = np.arange(7 * 9, dtype=np.uint8).reshape(7, 9)
+        assert block_mean(arr, 3).shape == (2, 3)
+
+    def test_factor_one_is_identity(self):
+        from app.services.image_utils import block_mean
+
+        arr = np.arange(12, dtype=np.uint8).reshape(3, 4)
+        assert block_mean(arr, 1) is arr
+
+    def test_image_smaller_than_block_raises(self):
+        from app.services.image_utils import block_mean
+
+        with pytest.raises(ValueError):
+            block_mean(np.zeros((3, 3), np.uint8), 4)
+
+
+class TestPreviewOfLargeImage:
+    def test_wide_16bit_image_is_reduced_to_max_width(self):
+        """The block-average pre-step must not stop short of max_width."""
+        import io
+
+        from PIL import Image
+
+        arr = np.random.randint(0, 65535, (30, 6528, 3), dtype=np.uint16)
+        img = Image.open(io.BytesIO(generate_preview(arr, max_width=2000)))
+        assert img.width == 2000
+
+
+class TestRationalFuncCalibration:
+    def test_16bit_matches_8bit(self):
+        from app.services.film_analyzer import rational_func_calibration
+
+        v8 = np.array([[0, 64, 128, 200, 255]], dtype=np.uint8)
+        v16 = v8.astype(np.uint16) * 257  # same fraction of full scale
+        d8 = rational_func_calibration(v8, 0.3, 1.0, -1.0)
+        d16 = rational_func_calibration(v16, 0.3, 1.0, -1.0)
+        assert d8.dtype == np.float32
+        np.testing.assert_allclose(d16, d8, rtol=1e-5)
+
+    def test_values(self):
+        from app.services.film_analyzer import rational_func_calibration
+
+        dose = rational_func_calibration(np.array([[128]], np.uint8), 0.3, 1.0, -1.0)
+        expected = 1.0 / (128 / 255 - 0.3) - 1.0
+        assert dose[0, 0] == pytest.approx(expected, rel=1e-6)
+
+    def test_zero_denominator_gives_c(self):
+        from app.services.film_analyzer import rational_func_calibration
+
+        # 51/255 == 0.2 exactly in float32 terms? Use a float input to be exact.
+        dose = rational_func_calibration(np.array([[0.2]], np.float32), 0.2, 1.0, -1.0)
+        assert dose[0, 0] == -1.0
+
+    def test_input_is_not_modified(self):
+        from app.services.film_analyzer import rational_func_calibration
+
+        v = np.array([[10, 20]], np.uint16)
+        before = v.copy()
+        rational_func_calibration(v, 0.3, 1.0, -1.0)
+        assert np.array_equal(v, before)
+
+    def test_dose_map_from_16bit_image_matches_8bit(self):
+        img8 = np.random.randint(0, 256, (6, 7, 3), dtype=np.uint8)
+        img16 = img8.astype(np.uint16) * 257
+
+        a8, a16 = FilmAnalyzer(), FilmAnalyzer()
+        a8.image_array, a16.image_array = img8, img16
+        for channel in ("Red", "Green", "Blue", "Mean"):
+            d8 = a8.calculate_dose_map(channel, 0.05, 2.0, -3.0)
+            d16 = a16.calculate_dose_map(channel, 0.05, 2.0, -3.0)
+            assert d8.dtype == np.float32
+            np.testing.assert_allclose(d16, d8, rtol=1e-5)
+
+
+class TestExtractColorPercentages16Bit:
+    def test_uint16_uses_full_scale(self):
+        image = np.full((10, 10, 3), 65535, dtype=np.uint16)
+        result = extract_color_percentages(image, x=0, y=0, w=10, h=10)
+        for key in ("red_pct", "green_pct", "blue_pct"):
+            assert result[key] == pytest.approx(1.0)
+
+    def test_uint16_matches_uint8(self):
+        img8 = np.random.randint(0, 256, (20, 20, 3), dtype=np.uint8)
+        img16 = img8.astype(np.uint16) * 257
+        r8 = extract_color_percentages(img8, x=2, y=3, w=10, h=12)
+        r16 = extract_color_percentages(img16, x=2, y=3, w=10, h=12)
+        for key in r8:
+            assert r16[key] == pytest.approx(r8[key], rel=1e-9)

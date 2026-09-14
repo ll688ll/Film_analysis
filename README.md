@@ -291,7 +291,9 @@ Environment variables (set in `.env` or system environment):
 | `DATABASE_URL` | `postgresql+asyncpg://...` | Database connection string |
 | `UPLOAD_DIR` | `uploads` | File upload directory |
 | `ACCESS_TOKEN_EXPIRE_MINUTES` | `1440` | JWT token expiry (24 hours) |
-| `MAX_UPLOAD_SIZE_MB` | `200` | Maximum upload file size |
+| `MAX_UPLOAD_SIZE_MB` | `200` | Maximum upload size for calibration-wizard and Image-page files |
+| `MAX_FILM_UPLOAD_SIZE_MB` | `400` | Maximum upload size for Film Dose scans (a 48-bit 1200 dpi scan is ~260 MB). Keep nginx's `client_max_body_size` at or above it |
+| `CALIBRATION_MAX_DPI` | `300` | Calibration scans above this are block-averaged down to it before use |
 | `IMAGE_CACHE_TTL_MINUTES` | `30` | In-memory image cache TTL |
 
 ## Desktop Application
