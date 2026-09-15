@@ -1,7 +1,19 @@
-import type { LevelMode } from "./roiTypes";
+import type { ContourSettings, LevelMode } from "./roiTypes";
 
 export const MIN_LEVELS = 2;
 export const MAX_LEVELS = 10;
+
+/** The contour view as it first opens: five preset percent levels, smoothed, no overlay. */
+export const DEFAULT_CONTOUR_SETTINGS: ContourSettings = {
+  mode: "percent",
+  levels: 5,
+  overlay: false,
+  smooth: true,
+  rangeMin: null,
+  rangeMax: null,
+  customPercent: null,
+  customGy: null,
+};
 
 /** Isodose presets in % of the ROI maximum; beyond 8 the levels are evenly spaced. */
 const PERCENT_PRESETS: Record<number, number[]> = {

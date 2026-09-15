@@ -1,8 +1,9 @@
 import { useMemo } from "react";
-import Plot from "react-plotly.js";
+import Plot from "../components/Plot";
 import { fmt, thousands } from "./format";
 import { IconDownload, toolbarButtonClass } from "./panelIcons";
-import { PLOT_AXIS, PLOT_BASE_LAYOUT, PLOT_CONFIG, verticalLine } from "./plotTheme";
+import { DARK_PALETTE, PLOT_AXIS, PLOT_BASE_LAYOUT, PLOT_CONFIG } from "./plotTheme";
+import { histogramFigure } from "./roiCharts";
 import { downloadCsvFile, histogramToCSV, type ExportMeta } from "./roiExport";
 import type { ROIStats } from "./roiTypes";
 
@@ -13,8 +14,7 @@ interface RoiHistogramProps {
   filmName: string | null;
 }
 
-const KEPT = "#38bdf8";
-const TRIMMED = "#475569";
+const palette = DARK_PALETTE;
 
 function LineSwatch({ color, dash }: { color: string; dash?: string }) {
   return (
@@ -34,52 +34,9 @@ export default function RoiHistogram({
   const hist = stats?.histogram ?? null;
   const trimmed = stats != null && stats.trim_low != null && stats.trim_high != null;
 
-  const { data, shapes } = useMemo(() => {
-    if (!hist || !stats) return { data: [], shapes: [] };
-    const lo = stats.trim_low ?? -Infinity;
-    const hi = stats.trim_high ?? Infinity;
-    const centers: number[] = [];
-    const colors: string[] = [];
-    for (let i = 0; i < hist.counts.length; i++) {
-      const c = hist.value_min + (i + 0.5) * hist.bin_width;
-      centers.push(c);
-      colors.push(c >= lo && c <= hi ? KEPT : TRIMMED);
-    }
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const data: any[] = [
-      {
-        type: "bar",
-        x: centers,
-        y: hist.counts,
-        width: hist.bin_width,
-        marker: { color: colors },
-        hovertemplate: "%{x:.3f} Gy: %{y:,} px<extra></extra>",
-      },
-    ];
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const shapes: any[] = [verticalLine(stats.mean, "#f8fafc")];
-    if (stats.median != null) shapes.push(verticalLine(stats.median, "#facc15", "dash"));
-    if (stats.trim_low != null && stats.trim_high != null) {
-      const tail = (x0: number, x1: number) => ({
-        type: "rect",
-        x0,
-        x1,
-        y0: 0,
-        y1: 1,
-        yref: "paper",
-        fillcolor: "rgba(251,113,133,0.12)",
-        line: { width: 0 },
-        layer: "below",
-      });
-      shapes.push(
-        tail(hist.value_min, stats.trim_low),
-        tail(stats.trim_high, hist.value_max),
-        verticalLine(stats.trim_low, "#fb7185", "dot"),
-        verticalLine(stats.trim_high, "#fb7185", "dot")
-      );
-    }
-    return { data, shapes };
-  }, [hist, stats]);
+  const figure = useMemo(() => (stats ? histogramFigure(stats, palette) : null), [stats]);
+  const data = figure?.data ?? [];
+  const shapes = figure?.shapes ?? [];
 
   const handleDownload = () => {
     if (!hist) return;
@@ -132,16 +89,16 @@ export default function RoiHistogram({
 
           <div className="mt-2 flex flex-wrap gap-x-3.5 gap-y-1.5 text-[11px] text-slate-300">
             <span className="inline-flex items-center gap-1.5">
-              <LineSwatch color="#f8fafc" />
+              <LineSwatch color={palette.meanLine} />
               Mean {fmt(stats.mean)}
             </span>
             <span className="inline-flex items-center gap-1.5">
-              <LineSwatch color="#facc15" dash="4 3" />
+              <LineSwatch color={palette.medianLine} dash="4 3" />
               Median {fmt(stats.median)}
             </span>
             {trimmed && (
               <span className="inline-flex items-center gap-1.5">
-                <LineSwatch color="#fb7185" dash="2 3" />
+                <LineSwatch color={palette.trimLine} dash="2 3" />
                 Trim {fmt(stats.trim_percent, 1)}%: {fmt(stats.trim_low, 2)}–
                 {fmt(stats.trim_high, 2)} Gy
               </span>

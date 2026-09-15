@@ -17,6 +17,19 @@ def pixel_full_scale(image_array) -> float:
     return 1.0
 
 
+def bit_depth(image_array) -> int | None:
+    """
+    Bits per sample of *image_array*: 8 for uint8 scans, 16 for the 48-bit
+    output of a film scanner. None for float data, which carries no bit depth.
+    """
+    dt = np.asarray(image_array).dtype
+    if dt == np.uint8:
+        return 8
+    if np.issubdtype(dt, np.integer):
+        return 16
+    return None
+
+
 def rational_func_calibration(pixel_val, a, b, c, scale=None):
     """
     Calculates dose from pixel value using the rational function:

@@ -12,7 +12,7 @@ import RoiProfiles, { type ProfilePair } from "./RoiProfiles";
 import StatsPanel from "./StatsPanel";
 import SummaryTiles from "./SummaryTiles";
 import type { ColormapName } from "./colormaps";
-import { contourLevels } from "./contourLevels";
+import { DEFAULT_CONTOUR_SETTINGS, contourLevels } from "./contourLevels";
 import { PANEL_TABS } from "./panelIcons";
 import { sampleProfile } from "./profileMetrics";
 import { buildIsolines } from "./isolines";
@@ -46,16 +46,7 @@ const DEFAULT_PREFS: RoiPanelPrefs = {
   width: SIDE_PANEL_DEFAULT_WIDTH,
   tab: "stats",
   toolsOpen: true,
-  contour: {
-    mode: "percent",
-    levels: 5,
-    overlay: false,
-    smooth: true,
-    rangeMin: null,
-    rangeMax: null,
-    customPercent: null,
-    customGy: null,
-  },
+  contour: DEFAULT_CONTOUR_SETTINGS,
 };
 
 interface RoiPanelProps {
@@ -79,6 +70,8 @@ interface RoiPanelProps {
   profileOffset: ProfileOffset;
   /** Whether the map should show the draggable profile crosshair. */
   onProfileCrosshairChange: (visible: boolean) => void;
+  /** The contour view's current settings, so a report can carry them. */
+  onContourSettingsChange?: (settings: ContourSettings) => void;
 }
 
 const railButtonClass = (active: boolean) =>
@@ -110,10 +103,11 @@ export default function RoiPanel({
   onOverlayIsolinesChange,
   profileOffset,
   onProfileCrosshairChange,
+  onContourSettingsChange,
 }: RoiPanelProps) {
   const [prefs, setPrefs] = usePersistedState<RoiPanelPrefs>(PREFS_KEY, DEFAULT_PREFS);
   const contour = useMemo<ContourSettings>(
-    () => ({ ...DEFAULT_PREFS.contour, ...prefs.contour }),
+    () => ({ ...DEFAULT_CONTOUR_SETTINGS, ...prefs.contour }),
     [prefs.contour]
   );
   const expanded = !prefs.collapsed;
@@ -194,6 +188,9 @@ export default function RoiPanel({
   useEffect(() => {
     onOverlayIsolinesChange(contour.overlay ? isolines : null);
   }, [contour.overlay, isolines, onOverlayIsolinesChange]);
+  useEffect(() => {
+    onContourSettingsChange?.(contour);
+  }, [contour, onContourSettingsChange]);
   useEffect(() => () => onOverlayIsolinesChange(null), [onOverlayIsolinesChange]);
 
   const needProfiles = expanded && prefs.tab === "profiles";

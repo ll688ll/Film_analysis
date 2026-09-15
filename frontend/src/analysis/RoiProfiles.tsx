@@ -1,8 +1,9 @@
 import { useMemo } from "react";
-import Plot from "react-plotly.js";
+import Plot from "../components/Plot";
 import { fmt } from "./format";
 import { IconDownload, toolbarButtonClass } from "./panelIcons";
-import { PLOT_AXIS, PLOT_BASE_LAYOUT, PLOT_CONFIG, verticalLine } from "./plotTheme";
+import { DARK_PALETTE, PLOT_AXIS, PLOT_BASE_LAYOUT, PLOT_CONFIG } from "./plotTheme";
+import { profileFigure } from "./roiCharts";
 import {
   profileMetrics,
   type DoseProfile,
@@ -31,51 +32,10 @@ function ProfileChart({
   profile: DoseProfile;
   metrics: ProfileMetrics;
 }) {
-  const { data, shapes } = useMemo(() => {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const data: any[] = [
-      {
-        type: "scatter",
-        mode: "lines",
-        x: profile.positionMm,
-        y: profile.dose,
-        line: { color: "#38bdf8", width: 1.5 },
-        hovertemplate: "%{x:.2f} mm: %{y:.3f} Gy<extra></extra>",
-      },
-    ];
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const shapes: any[] = [
-      {
-        type: "rect",
-        x0: -profile.halfExtentMm,
-        x1: profile.halfExtentMm,
-        y0: 0,
-        y1: 1,
-        yref: "paper",
-        fillcolor: "rgba(34,211,238,0.10)",
-        line: { width: 0 },
-        layer: "below",
-      },
-    ];
-    if (metrics.maxDose != null) {
-      for (const frac of [0.8, 0.5, 0.2]) {
-        shapes.push({
-          type: "line",
-          xref: "paper",
-          x0: 0,
-          x1: 1,
-          y0: frac * metrics.maxDose,
-          y1: frac * metrics.maxDose,
-          line: { color: "#94a3b8", width: 1, dash: "dot" },
-        });
-      }
-    }
-    if (metrics.left50Mm != null) shapes.push(verticalLine(metrics.left50Mm, "#facc15"));
-    if (metrics.right50Mm != null) shapes.push(verticalLine(metrics.right50Mm, "#facc15"));
-    // Where the other crosshair line crosses this profile
-    shapes.push(verticalLine(profile.crossMm, "#f8fafc", "dot"));
-    return { data, shapes };
-  }, [profile, metrics]);
+  const { data, shapes } = useMemo(
+    () => profileFigure(profile, metrics, DARK_PALETTE),
+    [profile, metrics]
+  );
 
   const offsetLabel =
     Math.abs(profile.offsetMm) < 0.005

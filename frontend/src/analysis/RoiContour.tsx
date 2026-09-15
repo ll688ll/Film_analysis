@@ -1,12 +1,11 @@
 import { useMemo, useState } from "react";
-import Plot from "react-plotly.js";
+import Plot from "../components/Plot";
 import { sampleColormap, type ColormapName } from "./colormaps";
 import { MAX_LEVELS, MIN_LEVELS, clampLevelCount, type ContourLevels } from "./contourLevels";
 import { fmt } from "./format";
-import { bandIndexGrid, contourField, doseGrid } from "./isolines";
-import { PLOT_AXIS, PLOT_BASE_LAYOUT, PLOT_CONFIG } from "./plotTheme";
+import { DARK_PALETTE, PLOT_AXIS, PLOT_BASE_LAYOUT, PLOT_CONFIG } from "./plotTheme";
+import { contourFigure } from "./roiCharts";
 import type { RoiCrop } from "./roiCrop";
-import { pxToMm } from "./roiGeometry";
 import type { ContourSettings, Isoline } from "./roiTypes";
 
 interface RoiContourProps {
@@ -89,86 +88,13 @@ export default function RoiContour({
     [colormap, n]
   );
 
-  const plot = useMemo(() => {
-    if (!crop || !levels) return null;
-    const field = contourField(crop, settings.smooth);
-    const stepped: Array<[number, string]> = [];
-    bandColors.forEach((color, k) => {
-      stepped.push([k / (n + 1), color], [(k + 1) / (n + 1), color]);
-    });
-
-    const bands = bandIndexGrid(field, levels.levels);
-    const bandCounts = new Array<number>(n + 1).fill(0);
-    for (const row of bands) for (const k of row) if (k !== null) bandCounts[k]++;
-
-    const xs: (number | null)[] = [];
-    const ys: (number | null)[] = [];
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const annotations: any[] = [];
-    (isolines ?? []).forEach((iso, i) => {
-      let longest: number[] = [];
-      for (const path of iso.paths) {
-        if (path.length > longest.length) longest = path;
-        for (let j = 0; j < path.length; j += 2) {
-          xs.push(pxToMm(path[j], dpi));
-          ys.push(pxToMm(path[j + 1], dpi));
-        }
-        xs.push(null);
-        ys.push(null);
-      }
-      const points = longest.length / 2;
-      if (points > 0) {
-        // Spread the labels around the nested contours rather than piling them up
-        const p = Math.floor(points * ((i + 0.5) / Math.max(1, n))) % points;
-        annotations.push({
-          x: pxToMm(longest[2 * p], dpi),
-          y: pxToMm(longest[2 * p + 1], dpi),
-          text: iso.label,
-          showarrow: false,
-          font: { size: 9, color: "#ffffff" },
-          bgcolor: "rgba(15,23,42,0.7)",
-          borderpad: 1,
-        });
-      }
-    });
-
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const data: any[] = [
-      {
-        type: "heatmap",
-        x: crop.xMm,
-        y: crop.yMm,
-        z: bands,
-        zmin: -0.5,
-        zmax: n + 0.5,
-        colorscale: stepped,
-        showscale: false,
-        customdata: doseGrid(field),
-        hovertemplate: "%{customdata:.3f} Gy<extra></extra>",
-        hoverongaps: false,
-      },
-      {
-        type: "scatter",
-        mode: "lines",
-        x: xs,
-        y: ys,
-        line: { color: "#0f172a", width: 3 },
-        opacity: 0.6,
-        hoverinfo: "skip",
-        connectgaps: false,
-      },
-      {
-        type: "scatter",
-        mode: "lines",
-        x: xs,
-        y: ys,
-        line: { color: "#ffffff", width: 1.2 },
-        hoverinfo: "skip",
-        connectgaps: false,
-      },
-    ];
-    return { data, annotations, bandCounts };
-  }, [crop, levels, isolines, bandColors, n, dpi, settings.smooth]);
+  const plot = useMemo(
+    () =>
+      crop && levels
+        ? contourFigure(crop, levels, isolines, bandColors, dpi, settings.smooth, DARK_PALETTE)
+        : null,
+    [crop, levels, isolines, bandColors, dpi, settings.smooth]
+  );
 
   const insideCount =
     crop && levels

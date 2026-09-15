@@ -222,6 +222,7 @@ async def save_profile(
             a=params.a,
             b=params.b,
             c=params.c,
+            r_squared=params.r_squared,
         ))
 
     # Save calibration points

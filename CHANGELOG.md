@@ -4,6 +4,50 @@ All notable changes to the Film Analysis tool are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.6.0] - 2026-09-14
+
+Shareable, interactive HTML reports.
+
+### Added
+
+- **Export Report on the Film Dose page.** The Save section gains an
+  "Export Report…" button that downloads one self-contained `.html` file:
+  the dose map (recolourable and re-windowable, with a cursor dose readout
+  and the ROI, isodose and profile-line outlines), the film scan beside it,
+  the summary tiles, the full statistics table with click-to-copy, the
+  histogram with its trim markers, the isodose map with live level controls,
+  both profiles with FWHM and penumbra, the calibration coefficients with the
+  fitted curve and its points, and a Method section that states how every
+  number was produced. A dialog takes a title, author, institution and
+  comment; author and institution are remembered. The file opens in any
+  browser without the app, a server or a login, stays interactive, prints to
+  PDF, and its CSV buttons still work. The test film gives a 2.2 MB file, of
+  which 1.65 MB is the viewer. See `docs/report-design.md`.
+- The dose map inside a report is block-averaged to at most 800 blocks a
+  side and quantised to 16 bits over the central 99 % of the map, widened to
+  the display and ROI ranges, then gzip-compressed with the browser's own
+  `CompressionStream`; a 45 MP scan fits in a few hundred kilobytes. The
+  Method section states the block size, the quantisation step and whether any
+  values were clamped; the statistics always come from the full map.
+- `POST /api/analysis/upload` and `POST /api/analysis/saved/{id}/open`
+  report `bit_depth` (8 or 16), and `GET /api/profiles` carries each
+  channel's `r_squared` and the profile's `calibration_points`, so a report
+  can state the scan's bit depth and plot the calibration curve behind its
+  dose map. The wizard now stores R² with the fitted coefficients.
+
+### Changed
+
+- The app ships Plotly's cartesian build instead of the full one. Every
+  chart is a bar, scatter or heatmap, so nothing changes on screen, but the
+  main bundle drops from 5.5 MB to about 2 MB, and the report viewer shares
+  the same `Plot` component.
+- The histogram, contour and profile figures are built by pure functions in
+  `roiCharts.ts` from a palette, so the panel (dark) and the report (light)
+  draw identical figures.
+- `npm run build` now builds the report viewer first (`npm run build:report`
+  writes `public/report/report.js` and `report.css`, which are gitignored),
+  and `npm run dev` builds it once if it is missing.
+
 ## [1.5.0] - 2026-09-14
 
 High-resolution 48-bit film scans.

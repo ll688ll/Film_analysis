@@ -1,5 +1,5 @@
 import { useCallback, useMemo } from "react";
-import Plot from "react-plotly.js";
+import Plot from "../components/Plot";
 import type { AnalyzeResponse, Level } from "./types";
 
 export type HistogramMode = "levels" | "rgb";

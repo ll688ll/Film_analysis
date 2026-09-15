@@ -29,7 +29,7 @@ from app.models import (
 )
 from app.routers.projects import get_user_project
 from app.services.analysis_files import delete_owned_file, own_file
-from app.services.film_analyzer import FilmAnalyzer, build_roi_mask
+from app.services.film_analyzer import FilmAnalyzer, bit_depth, build_roi_mask
 from app.services.image_io import read_dpi
 from app.services.image_utils import (
     generate_dose_map_preview,
@@ -442,6 +442,7 @@ async def upload_image(
         width=w,
         height=h,
         channels=channels,
+        bit_depth=bit_depth(image_array),
     )
 
     return {
@@ -450,6 +451,8 @@ async def upload_image(
         "height": h,
         "dpi": dpi,
         "channels": channels,
+        # 8 or 16; a report should say which, since it decides the dose resolution
+        "bit_depth": bit_depth(image_array),
         "filename": file.filename,
     }
 
@@ -873,6 +876,7 @@ async def open_saved_analysis(
         width=w,
         height=h,
         channels=channels,
+        bit_depth=bit_depth(image_array),
         cmap_min=record.cmap_min,
         cmap_max=record.cmap_max,
     )
@@ -884,6 +888,7 @@ async def open_saved_analysis(
             "width": w,
             "height": h,
             "channels": channels,
+            "bit_depth": bit_depth(image_array),
             "dpi": dpi,
         }
     )
