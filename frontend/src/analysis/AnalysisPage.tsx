@@ -4,9 +4,21 @@ import { setSharedSession } from "../api/imageSession";
 import {
   subscribePendingRestore,
   takePendingRestore,
+  type ProfileSnapshot,
   type RestorePayload,
 } from "../api/analysisTransfer";
+import { useAuth } from "../auth/AuthContext";
+import { baseName, downloadBlob } from "../imaging/exporters";
+import {
+  assembleReportHtml,
+  fetchViewerAssets,
+  reportFileName,
+} from "../report/assembleReport";
+import { buildReportPayload, type ReportSource } from "../report/buildReport";
+import type { ReportCalibration, ReportMeta } from "../report/reportTypes";
 import CalibrationPanel, { type Profile } from "./CalibrationPanel";
+import { DEFAULT_CONTOUR_SETTINGS } from "./contourLevels";
+import ReportDialog from "./ReportDialog";
 import ImageCanvas, { type RoiChangeReason } from "./ImageCanvas";
 import ColorBar from "./ColorBar";
 import RoiPanel from "./RoiPanel";
@@ -14,6 +26,7 @@ import { useDoseMap } from "./useDoseMap";
 import type { ColormapName } from "./colormaps";
 import { ZERO_OFFSET, clampProfileOffset } from "./profileMetrics";
 import type {
+  ContourSettings,
   Isoline,
   ProfileOffset,
   ROIData,
@@ -27,6 +40,8 @@ interface ImageInfo {
   height: number;
   dpi: number;
   channels: number;
+  /** 8 or 16 bits per sample; null when unknown. */
+  bitDepth: number | null;
 }
 
 interface UploadResponse {
@@ -35,6 +50,7 @@ interface UploadResponse {
   height: number;
   dpi: number;
   channels: number;
+  bit_depth?: number | null;
 }
 
 interface ProjectSummary {
@@ -59,7 +75,19 @@ interface AppliedCalibration {
   c: number;
 }
 
+function sameCalibration(x: AppliedCalibration, y: AppliedCalibration): boolean {
+  return (
+    x.profile_id === y.profile_id &&
+    x.channel === y.channel &&
+    x.a === y.a &&
+    x.b === y.b &&
+    x.c === y.c
+  );
+}
+
 export default function AnalysisPage({ visible = true }: { visible?: boolean }) {
+  const { user } = useAuth();
+
   // Session state
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [imageInfo, setImageInfo] = useState<ImageInfo | null>(null);
@@ -81,6 +109,14 @@ export default function AnalysisPage({ visible = true }: { visible?: boolean }) 
   // Last-applied calibration params (needed for save)
   const [appliedCalibration, setAppliedCalibration] =
     useState<AppliedCalibration | null>(null);
+
+  // The calibration snapshot of a reopened analysis, kept only while the
+  // applied coefficients are still the ones it describes. A report prefers
+  // it over the live profile, which may have been edited since.
+  const [profileSnapshot, setProfileSnapshot] = useState<{
+    calibration: AppliedCalibration;
+    data: ProfileSnapshot;
+  } | null>(null);
 
   // Calibration and ROI handed to the child panels when restoring
   const [restoreCalibration, setRestoreCalibration] =
@@ -122,6 +158,11 @@ export default function AnalysisPage({ visible = true }: { visible?: boolean }) 
   const [saving, setSaving] = useState(false);
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+
+  // Report export: the dialog, and the contour settings the panel reports
+  const [reportOpen, setReportOpen] = useState(false);
+  const [contourSettings, setContourSettings] =
+    useState<ContourSettings>(DEFAULT_CONTOUR_SETTINGS);
 
   // Colormap and dose range
   const [colormap, setColormap] = useState<ColormapName>("jet");
@@ -211,6 +252,7 @@ export default function AnalysisPage({ visible = true }: { visible?: boolean }) 
     // A new film starts a new study; the next save must not overwrite the
     // analysis that happened to be open before.
     setSavedAnalysisId(null);
+    setProfileSnapshot(null);
     setRestoreError(null);
 
     try {
@@ -229,6 +271,7 @@ export default function AnalysisPage({ visible = true }: { visible?: boolean }) 
         height: data.height,
         dpi: data.dpi,
         channels: data.channels,
+        bitDepth: data.bit_depth ?? null,
       });
 
       // Fetch preview as blob via authenticated client
@@ -294,6 +337,10 @@ export default function AnalysisPage({ visible = true }: { visible?: boolean }) 
           b: params.b,
           c: params.c,
         });
+        // A different calibration is no longer the one the snapshot describes
+        setProfileSnapshot((prev) =>
+          prev && sameCalibration(prev.calibration, params) ? prev : null
+        );
       } catch (err: any) {
         alert(err.response?.data?.detail || "Calibration failed.");
       } finally {
@@ -326,6 +373,7 @@ export default function AnalysisPage({ visible = true }: { visible?: boolean }) 
         height: payload.height,
         dpi: payload.dpi,
         channels: payload.channels,
+        bitDepth: payload.bit_depth ?? null,
       });
 
       setColormap(toColormap(payload.colormap));
@@ -353,6 +401,11 @@ export default function AnalysisPage({ visible = true }: { visible?: boolean }) 
       };
       setRestoreCalibration(calibration);
       setRestoreVersion((v) => v + 1);
+      setProfileSnapshot(
+        payload.profile_snapshot
+          ? { calibration, data: payload.profile_snapshot }
+          : null
+      );
 
       try {
         const previewRes = await client.get(
@@ -622,6 +675,142 @@ export default function AnalysisPage({ visible = true }: { visible?: boolean }) 
     if (patch.cornerCutMm !== undefined) setCornerCutMm(patch.cornerCutMm);
   }, []);
 
+  // The calibration a report should describe: the reopened analysis's
+  // snapshot when it still applies, else the live profile, else the numbers.
+  const resolveReportCalibration = useCallback((): ReportCalibration | null => {
+    if (!appliedCalibration) return null;
+    const base = {
+      channel: appliedCalibration.channel,
+      a: appliedCalibration.a,
+      b: appliedCalibration.b,
+      c: appliedCalibration.c,
+    };
+    const snap = profileSnapshot?.data;
+    if (snap && snap.profile_name) {
+      return {
+        ...base,
+        source: "snapshot",
+        profileName: snap.profile_name,
+        profileNote: snap.note ?? "",
+        channels: snap.channels.map((ch) => ({
+          channel: ch.channel,
+          a: ch.a,
+          b: ch.b,
+          c: ch.c,
+          r_squared: ch.r_squared ?? null,
+        })),
+        points: (snap.calibration_points ?? []).map((p) => ({
+          dose: p.dose,
+          red_pct: p.red_pct,
+          green_pct: p.green_pct,
+          blue_pct: p.blue_pct,
+        })),
+      };
+    }
+    const live =
+      appliedCalibration.profile_id !== null
+        ? profiles.find((p) => p.id === appliedCalibration.profile_id)
+        : undefined;
+    if (live) {
+      return {
+        ...base,
+        source: "profile",
+        profileName: live.name,
+        profileNote: live.note ?? live.notes ?? "",
+        channels: live.channel_params.map((ch) => ({
+          channel: ch.channel,
+          a: ch.a,
+          b: ch.b,
+          c: ch.c,
+          r_squared: ch.r_squared ?? null,
+        })),
+        points: live.calibration_points ?? [],
+      };
+    }
+    return { ...base, source: "manual", profileName: null, profileNote: "", channels: [], points: [] };
+  }, [appliedCalibration, profileSnapshot, profiles]);
+
+  // Build the self-contained HTML report from what this page already holds
+  // and hand it to the browser as a download.
+  const handleExportReport = useCallback(
+    async (meta: ReportMeta) => {
+      if (!doseMapData || !imageInfo) {
+        throw new Error("Calibrate the film before exporting a report.");
+      }
+      const calibration = resolveReportCalibration();
+      if (!calibration) throw new Error("Apply a calibration before exporting a report.");
+
+      let version: string | null = null;
+      try {
+        version = (await client.get<{ version?: string }>("/health")).data.version ?? null;
+      } catch {
+        /* the version line is cosmetic */
+      }
+
+      const source: ReportSource = {
+        version,
+        meta,
+        film: {
+          filename: filmName,
+          width: imageInfo.width,
+          height: imageInfo.height,
+          dpi: imageInfo.dpi,
+          channels: imageInfo.channels,
+          bitDepth: imageInfo.bitDepth,
+          notes,
+          project: projects.find((p) => p.id === projectId)?.name ?? null,
+          savedAnalysisId,
+        },
+        previewUrl,
+        calibration,
+        display: { colormap, cmapMin, cmapMax },
+        dose: {
+          array: doseMapData.doseArray,
+          width: doseMapData.width,
+          height: doseMapData.height,
+        },
+        roi:
+          currentROI && stats
+            ? {
+                geometry: currentROI,
+                settings: roiSettings,
+                stats,
+                contour: contourSettings,
+                profileOffset,
+              }
+            : null,
+      };
+
+      const [payload, assets] = await Promise.all([
+        buildReportPayload(source),
+        fetchViewerAssets(),
+      ]);
+      downloadBlob(
+        new Blob([assembleReportHtml(payload, assets)], { type: "text/html;charset=utf-8" }),
+        reportFileName(payload)
+      );
+    },
+    [
+      doseMapData,
+      imageInfo,
+      resolveReportCalibration,
+      filmName,
+      notes,
+      projects,
+      projectId,
+      savedAnalysisId,
+      previewUrl,
+      colormap,
+      cmapMin,
+      cmapMax,
+      currentROI,
+      stats,
+      roiSettings,
+      contourSettings,
+      profileOffset,
+    ]
+  );
+
   return (
     <div className="flex-1 flex overflow-hidden">
       {/* Left Sidebar: the film and its calibration */}
@@ -820,6 +1009,22 @@ export default function AnalysisPage({ visible = true }: { visible?: boolean }) 
             {saveError && (
               <p className="mt-2 text-xs text-red-400">{saveError}</p>
             )}
+
+            <div className="mt-3 pt-3 border-t border-slate-600">
+              <button
+                type="button"
+                onClick={() => setReportOpen(true)}
+                disabled={!doseMapData}
+                title={
+                  doseMapData
+                    ? "Download a self-contained, interactive HTML report of this analysis"
+                    : "Calibrate the film first"
+                }
+                className="w-full px-3 py-2 text-sm font-medium rounded-lg border border-slate-500 text-slate-200 hover:bg-slate-600 disabled:opacity-50 disabled:hover:bg-transparent transition-colors"
+              >
+                Export Report…
+              </button>
+            </div>
           </div>
         )}
       </aside>
@@ -911,6 +1116,17 @@ export default function AnalysisPage({ visible = true }: { visible?: boolean }) 
         onOverlayIsolinesChange={setOverlayIsolines}
         profileOffset={profileOffset}
         onProfileCrosshairChange={setShowProfileCrosshair}
+        onContourSettingsChange={setContourSettings}
+      />
+
+      <ReportDialog
+        open={reportOpen}
+        onClose={() => setReportOpen(false)}
+        defaultTitle={filmName ? baseName(filmName) : "Film dose analysis"}
+        defaultAuthor={user?.username ?? ""}
+        hasRoi={!!(currentROI && stats)}
+        roiPending={statsLoading}
+        onExport={handleExportReport}
       />
     </div>
   );

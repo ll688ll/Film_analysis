@@ -178,6 +178,20 @@ async def test_save_profile(auth_client: AsyncClient):
     assert data["name"] == "Test Wizard Profile"
     assert data["primary_channel"] == "Red"
 
+    # The profile list carries the fit quality and the measured points, so a
+    # report can plot the calibration curve behind a dose map.
+    listed = await auth_client.get("/api/profiles")
+    assert listed.status_code == 200
+    profile = next(p for p in listed.json() if p["id"] == data["id"])
+    red = next(cp for cp in profile["channel_params"] if cp["channel"] == "Red")
+    assert red["r_squared"] == pytest.approx(0.999)
+    assert [pt["dose"] for pt in profile["calibration_points"]] == [0.5, 2.0, 5.0, 10.0]
+    assert profile["calibration_points"][0]["red_pct"] == 80
+
+    detail = await auth_client.get(f"/api/profiles/{data['id']}")
+    assert detail.status_code == 200
+    assert len(detail.json()["calibration_points"]) == 4
+
 
 # ---------------------------------------------------------------------------
 # Full wizard workflow (integration)

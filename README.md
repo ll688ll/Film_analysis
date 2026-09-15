@@ -16,6 +16,7 @@ Originally built as a desktop tkinter application (`main.py`), now extended with
 - **Project folders** — Group saved analyses into per-user projects; move them between projects or leave them unfiled
 - **Resume a study** — Reopen a saved analysis on the Film Analysis page with its calibration, ROI, and display settings restored, then update it in place or fork it with "Save as New"
 - **CSV export** — Export ROI measurement data, including trim and corner-cut settings
+- **HTML reports** — Export one self-contained, interactive `.html` file per analysis: the dose map (recolourable, with a cursor readout and the ROI, isodose and profile outlines), the scan beside it, the statistics table, histogram, isodose map, profiles, the calibration curve, and a Method section. It opens in any browser without the app, prints to PDF, and needs no server or login to share (see `docs/report-design.md`)
 - **Legacy import** — Import calibration profiles from the desktop app's `calibration_config.json`
 
 ## Calibration Model
@@ -26,6 +27,12 @@ The calibration uses a rational function model:
 - **Inverse model** (dose calculation): `Dose = b / (Color% - a) + c`
 
 Where `Color% = pixel_value / 255.0` (0–1 range). Curves are fitted independently for Red, Green, and Blue channels using `scipy.optimize.curve_fit`.
+
+## HTML Reports
+
+**Export Report…** in the Save section of the Film Dose page downloads one `.html` file that contains everything about the open analysis: the dose map, the film scan, the ROI statistics, histogram, isodose contours and profiles, the calibration with its fitted curve, and a Method section. The page builds the file itself from the data it already holds, so the numbers are exactly those on screen; the dose map is embedded block-averaged (at most 800 blocks a side) and quantised to 16 bits so that even a 1200 dpi scan gives a file of a few megabytes.
+
+The file opens in any modern browser from disk or an e-mail attachment, with no server, login or network, and stays interactive: recolour and re-window the map, read the dose under the cursor, toggle the outlines, change the contour levels, hover and zoom the charts, copy statistics, download the CSVs, and print to PDF. `docs/report-design.md` describes the payload and the viewer build.
 
 ## Architecture
 
@@ -47,7 +54,7 @@ Where `Color% = pixel_value / 255.0` (0–1 range). Curves are fitted independen
 - React 18 + React Router + Vite
 - Tailwind CSS for styling
 - react-konva for canvas-based image display and ROI interaction
-- Plotly.js for calibration curves and the ROI histogram, contour, and profile charts
+- Plotly.js (cartesian build, 1.4 MB instead of the full 4.8 MB) for calibration curves and the ROI histogram, contour, and profile charts; the same figures are drawn by the standalone report viewer, built separately by `vite.report.config.ts`
 - Client-side dose map rendering with Canvas API
 - Axios with JWT interceptor
 
@@ -99,12 +106,14 @@ Film_analysis/
 │
 ├── docs/
 │   ├── analysis-history-design.md  # Design of the saved-analysis feature
-│   └── roi-analysis-panel-design.md # Design of the ROI analysis panel
+│   ├── roi-analysis-panel-design.md # Design of the ROI analysis panel
+│   └── report-design.md            # Design of the HTML report export
 │
 ├── frontend/
 │   ├── Dockerfile
 │   ├── nginx.conf
 │   ├── package.json
+│   ├── vite.report.config.ts  # Builds the report viewer into public/report/ (gitignored)
 │   └── src/
 │       ├── main.tsx           # App entry point
 │       ├── App.tsx            # Routes and context providers
@@ -120,6 +129,8 @@ Film_analysis/
 │       │   ├── RoiHistogram.tsx
 │       │   ├── RoiContour.tsx
 │       │   ├── RoiProfiles.tsx
+│       │   ├── roiCharts.ts       # Plotly figures shared by the panel and the report
+│       │   ├── ReportDialog.tsx   # Export Report dialog
 │       │   ├── roiGeometry.ts     # Client-side mirror of build_roi_mask
 │       │   ├── roiCrop.ts         # Masked, block-averaged ROI crop
 │       │   ├── marchingSquares.ts # Isolines from a scalar grid
@@ -134,7 +145,8 @@ Film_analysis/
 │       │   ├── WizardCanvas.tsx
 │       │   └── CurveChart.tsx
 │       ├── history/           # Analysis history page
-│       └── components/        # Layout, ProtectedRoute, ProtectedTabs, SidePanel
+│       ├── report/            # HTML report: payload builder, file assembly, standalone viewer
+│       └── components/        # Layout, ProtectedRoute, ProtectedTabs, SidePanel, Plot
 │
 └── test/
     └── CAL_007.tif            # Sample calibration film scan
@@ -194,6 +206,8 @@ npm run dev
 
 The Vite dev server proxies `/api` requests to `http://localhost:8000`.
 
+`npm run dev` builds the standalone report viewer once if `public/report/` is missing, and `npm run build` always rebuilds it first. After editing `frontend/src/report/`, run `npm run build:report` so Export Report picks up the change.
+
 ### Running Tests
 
 ```bash
@@ -220,7 +234,7 @@ All endpoints are prefixed with `/api`. Protected endpoints require a `Bearer` t
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/api/profiles` | List user's calibration profiles |
+| GET | `/api/profiles` | List user's calibration profiles, with each channel's R² and the calibration points |
 | POST | `/api/profiles` | Create a new profile |
 | GET | `/api/profiles/{id}` | Get profile details |
 | PUT | `/api/profiles/{id}` | Update a profile |
@@ -244,7 +258,7 @@ Working-session endpoints take the in-memory cache UUID returned by `/upload`:
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| POST | `/api/analysis/upload` | Upload film scan for analysis |
+| POST | `/api/analysis/upload` | Upload film scan for analysis; returns size, DPI, channels and bit depth |
 | GET | `/api/analysis/{id}/preview` | Get film image preview (JPEG) |
 | POST | `/api/analysis/{id}/calibrate` | Apply calibration, generate dose map |
 | GET | `/api/analysis/{id}/dose-preview` | Get dose map as PNG image |

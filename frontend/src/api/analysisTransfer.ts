@@ -45,6 +45,24 @@ export interface SavedStats {
   roi_type?: string;
 }
 
+/** The immutable calibration record written at save time (analysis-history-design.md §3.4). */
+export interface ProfileSnapshot {
+  profile_id?: number;
+  profile_name: string | null;
+  note?: string;
+  primary_channel?: string | null;
+  channels: Array<{ channel: string; a: number; b: number; c: number; r_squared?: number | null }>;
+  calibration_points?: Array<{
+    dose: number;
+    red_pct: number;
+    green_pct: number;
+    blue_pct: number;
+    source_filename?: string;
+  }>;
+  applied?: { channel: string; a: number; b: number; c: number };
+  snapshot_at?: string;
+}
+
 export interface ProfileInfo {
   id: number | null;
   name: string | null;
@@ -81,8 +99,9 @@ export interface RestorePayload extends SavedAnalysis {
   width: number;
   height: number;
   channels: number;
+  bit_depth: number | null;
   image_channels: number | null;
-  profile_snapshot: Record<string, unknown> | null;
+  profile_snapshot: ProfileSnapshot | null;
   roi: SavedROI | null;
   stats: SavedStats | null;
 }

@@ -1,4 +1,4 @@
-import Plot from "react-plotly.js";
+import Plot from "../components/Plot";
 
 interface CurveChartProps {
   points: Array<{ dose: number; red_pct: number; green_pct: number; blue_pct: number }>;

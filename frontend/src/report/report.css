@@ -1,0 +1,42 @@
+/* Standalone report: light page, printable. Tailwind utilities do the rest. */
+
+.report-page {
+  color: #1e293b;
+}
+
+.report-canvas {
+  display: block;
+  width: 100%;
+  height: auto;
+  image-rendering: auto;
+}
+
+/* Plotly's hover layer sits above the sticky nav otherwise */
+.report-page .js-plotly-plot .plotly .hoverlayer {
+  z-index: 5;
+}
+
+@page {
+  size: A4;
+  margin: 12mm;
+}
+
+@media print {
+  body {
+    background: #fff !important;
+  }
+  .no-print {
+    display: none !important;
+  }
+  .report-page {
+    max-width: none;
+    padding: 0;
+  }
+  .report-section {
+    break-inside: avoid;
+    box-shadow: none;
+  }
+  .report-section-break {
+    break-before: page;
+  }
+}

@@ -56,6 +56,8 @@ async def test_upload_image(auth_client: AsyncClient, test_film_path: str):
     assert data["height"] > 0
     assert data["dpi"] > 0
     assert data["filename"] == "CAL_007.tif"
+    # The test film is a 48-bit scan; a report states this, so upload must too.
+    assert data["bit_depth"] == 16
 
 
 async def test_upload_unsupported_extension(auth_client: AsyncClient):

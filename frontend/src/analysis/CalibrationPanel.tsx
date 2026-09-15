@@ -6,6 +6,14 @@ export interface ChannelParams {
   a: number;
   b: number;
   c: number;
+  r_squared?: number | null;
+}
+
+export interface CalibrationPoint {
+  dose: number;
+  red_pct: number;
+  green_pct: number;
+  blue_pct: number;
 }
 
 export interface Profile {
@@ -15,6 +23,8 @@ export interface Profile {
   note?: string;
   primary_channel?: string;
   channel_params: ChannelParams[];
+  /** Measured points behind the fit; empty for profiles imported from the desktop app. */
+  calibration_points?: CalibrationPoint[];
 }
 
 interface CalibrationPanelProps {

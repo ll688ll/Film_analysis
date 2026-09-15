@@ -345,6 +345,7 @@ async def test_open_returns_a_usable_session(
     assert payload["session_id"] != session_id
     assert payload["roi"]["x"] == 100
     assert payload["width"] > 0
+    assert payload["bit_depth"] == 16
 
     new_session = payload["session_id"]
     assert (

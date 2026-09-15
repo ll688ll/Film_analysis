@@ -47,6 +47,17 @@ class ChannelParamsOut(BaseModel):
     a: float
     b: float
     c: float
+    r_squared: float | None = None
+
+    class Config:
+        from_attributes = True
+
+
+class CalibrationPointOut(BaseModel):
+    dose: float
+    red_pct: float
+    green_pct: float
+    blue_pct: float
 
     class Config:
         from_attributes = True
@@ -58,6 +69,9 @@ class ProfileOut(BaseModel):
     note: str | None = None
     primary_channel: str | None = None
     channel_params: list[ChannelParamsOut] = []
+    # The measured points behind the fit, so a report can show the curve
+    # that produced its dose map. Empty for imported legacy profiles.
+    calibration_points: list[CalibrationPointOut] = []
 
     class Config:
         from_attributes = True
@@ -72,7 +86,10 @@ class LegacyImportPayload(BaseModel):
 # ---------------------------------------------------------------------------
 
 def _eager_load():
-    return selectinload(CalibrationProfile.channel_params)
+    return (
+        selectinload(CalibrationProfile.channel_params),
+        selectinload(CalibrationProfile.calibration_points),
+    )
 
 
 async def _get_user_profile(
@@ -80,7 +97,7 @@ async def _get_user_profile(
 ) -> CalibrationProfile:
     result = await db.execute(
         select(CalibrationProfile)
-        .options(_eager_load())
+        .options(*_eager_load())
         .where(
             CalibrationProfile.id == profile_id,
             CalibrationProfile.user_id == user_id,
@@ -103,7 +120,7 @@ async def list_profiles(
 ):
     result = await db.execute(
         select(CalibrationProfile)
-        .options(_eager_load())
+        .options(*_eager_load())
         .where(CalibrationProfile.user_id == current_user.id)
         .order_by(CalibrationProfile.id)
     )
@@ -134,7 +151,9 @@ async def create_profile(
             c=ch.c,
         ))
     await db.flush()
-    await db.refresh(profile, attribute_names=["channel_params"])
+    await db.refresh(
+            profile, attribute_names=["channel_params", "calibration_points"]
+        )
     return profile
 
 
@@ -178,7 +197,9 @@ async def update_profile(
                 c=ch.c,
             ))
         await db.flush()
-        await db.refresh(profile, attribute_names=["channel_params"])
+        await db.refresh(
+            profile, attribute_names=["channel_params", "calibration_points"]
+        )
 
     return profile
 
@@ -232,7 +253,9 @@ async def import_legacy_profiles(
             ))
 
         await db.flush()
-        await db.refresh(profile, attribute_names=["channel_params"])
+        await db.refresh(
+            profile, attribute_names=["channel_params", "calibration_points"]
+        )
         created.append(profile)
 
     return created
