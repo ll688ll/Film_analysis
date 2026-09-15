@@ -751,7 +751,14 @@ class TestRationalFuncCalibration:
         assert np.array_equal(v, before)
 
     def test_dose_map_from_16bit_image_matches_8bit(self):
-        img8 = np.random.randint(0, 256, (6, 7, 3), dtype=np.uint8)
+        rng = np.random.default_rng(0)
+        img8 = rng.integers(0, 256, (6, 7, 3), dtype=np.uint8)
+        # Plant the two hardest pixels for the "Mean" path so they are
+        # exercised regardless of the seed: a channel mean just above
+        # a * 255 = 12.75 (tiny denominator, dose ~ -6000) and one where
+        # b / (mean - a) + c crosses zero (relative error is meaningless).
+        img8[0, 0] = (12, 13, 13)
+        img8[0, 1] = (182, 183, 183)
         img16 = img8.astype(np.uint16) * 257
 
         a8, a16 = FilmAnalyzer(), FilmAnalyzer()
@@ -760,7 +767,11 @@ class TestRationalFuncCalibration:
             d8 = a8.calculate_dose_map(channel, 0.05, 2.0, -3.0)
             d16 = a16.calculate_dose_map(channel, 0.05, 2.0, -3.0)
             assert d8.dtype == np.float32
-            np.testing.assert_allclose(d16, d8, rtol=1e-5)
+            # The map is float32 and the "Mean" path rounds the channel
+            # mean once more than the single-channel path, so 1e-5 is
+            # tighter than float32 guarantees near a small denominator.
+            # 1e-4 leaves ~10x margin; atol covers doses that land at ~0.
+            np.testing.assert_allclose(d16, d8, rtol=1e-4, atol=1e-3)
 
 
 class TestExtractColorPercentages16Bit:
